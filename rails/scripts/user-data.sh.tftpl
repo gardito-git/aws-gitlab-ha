@@ -1,0 +1,214 @@
+#!/bin/bash
+# GitLab Rails node bootstrap (rendered by Terraform, runs once at first boot).
+# Log: /var/log/cloud-init-output.log
+set -euo pipefail
+
+REGION="${region}"
+export PATH="$PATH:/snap/bin"
+
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$@"; }
+get_secret() {
+  for _ in $(seq 1 60); do
+    aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null && return 0
+    sleep 10
+  done
+  echo "could not read secret $1" >&2
+  return 1
+}
+# One attempt: for secrets that another node fills in later.
+try_secret() { aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null; }
+wait_for_port() {
+  until timeout 3 bash -c "</dev/tcp/$1/$2" 2>/dev/null; do
+    echo "waiting for $1:$2"
+    sleep 10
+  done
+}
+reconfigure() {
+  for attempt in $(seq 1 20); do
+    gitlab-ctl reconfigure && return 0
+    echo "reconfigure failed (attempt $attempt), retrying in 30 s"
+    sleep 30
+  done
+  return 1
+}
+
+hostnamectl set-hostname "${hostname}"
+echo "127.0.1.1 ${hostname}" >> /etc/hosts
+timedatectl set-timezone Etc/UTC
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install curl jq
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+# --- Secrets ---------------------------------------------------------------
+ROOT_PASSWORD=$(get_secret "${root_password_secret_arn}")
+SHELL_TOKEN=$(get_secret "${gitlab_shell_secret_arn}")
+DB_PASSWORD=$(get_secret "${gitlab_db_secret_arn}")
+REDIS_PASSWORD=$(get_secret "${redis_password_secret_arn}")
+PRAEFECT_TOKEN=$(get_secret "${praefect_external_token_secret_arn}")
+SSH_HOST_KEY_JSON=$(get_secret "${ssh_host_key_secret_arn}")
+
+install -d -m 755 /etc/gitlab /etc/gitlab/trusted-certs
+touch /etc/gitlab/skip-auto-reconfigure
+
+%{ if gitlab_ca_cert != "" ~}
+cat > /etc/gitlab/trusted-certs/gitlab-ca.crt <<'EOF'
+${gitlab_ca_cert}
+EOF
+cp /etc/gitlab/trusted-certs/gitlab-ca.crt /usr/local/share/ca-certificates/gitlab-ca.crt
+update-ca-certificates
+%{ endif ~}
+
+cat > /etc/gitlab/gitlab.rb <<EOF
+# GitLab Rails node: NGINX + Workhorse + Puma. Written by the first-boot script.
+external_url '${gitlab_url}'
+
+## Runs elsewhere in the cluster (or not at all)
+postgresql['enable'] = false
+redis['enable'] = false
+gitaly['enable'] = false
+praefect['enable'] = false
+sidekiq['enable'] = false
+prometheus['enable'] = false
+alertmanager['enable'] = false
+postgres_exporter['enable'] = false
+redis_exporter['enable'] = false
+gitlab_kas['enable'] = false
+gitlab_rails['gitlab_kas_enabled'] = false
+letsencrypt['enable'] = false
+
+## Plain HTTP behind the NLB's TLS listener
+nginx['listen_port'] = 80
+nginx['listen_https'] = false
+nginx['proxy_set_headers'] = { 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }
+gitlab_rails['trusted_proxies'] = ['${vpc_cidr}']
+
+## Database migrations and the first root password: rails-1 only
+gitlab_rails['auto_migrate'] = ${is_primary}
+gitlab_rails['initial_root_password'] = '$ROOT_PASSWORD'
+
+## PostgreSQL primary through the postgres NLB (no PgBouncer)
+gitlab_rails['db_host'] = '${postgres_endpoint}'
+gitlab_rails['db_port'] = 5432
+gitlab_rails['db_database'] = 'gitlabhq_production'
+gitlab_rails['db_username'] = 'gitlab'
+gitlab_rails['db_password'] = '$DB_PASSWORD'
+
+## Redis: ask the Sentinels for the current primary
+redis['master_name'] = '${redis_master_name}'
+redis['master_password'] = '$REDIS_PASSWORD'
+gitlab_rails['redis_sentinels'] = [
+%{ for host in redis_sentinel_hosts ~}
+  { 'host' => '${host}', 'port' => 26379 },
+%{ endfor ~}
+]
+
+## Git repositories: Gitaly Cluster through the Praefect NLB
+gitlab_rails['repositories_storages'] = {
+  'default' => { 'gitaly_address' => 'tcp://${praefect_endpoint}:2305', 'gitaly_token' => '$PRAEFECT_TOKEN' },
+}
+gitlab_shell['secret_token'] = '$SHELL_TOKEN'
+
+## Object storage: private S3 buckets, instance role credentials, downloads proxied
+gitlab_rails['object_store']['enabled'] = true
+gitlab_rails['object_store']['proxy_download'] = true
+gitlab_rails['object_store']['connection'] = { 'provider' => 'AWS', 'region' => '$REGION', 'use_iam_profile' => true }
+%{ for type, bucket in object_buckets ~}
+gitlab_rails['object_store']['objects']['${replace(type, "-", "_")}']['bucket'] = '${bucket}'
+%{ endfor ~}
+
+## Backups (cron on rails-1) go to S3; the bucket's lifecycle rule prunes them
+gitlab_rails['backup_upload_connection'] = { 'provider' => 'AWS', 'region' => '$REGION', 'use_iam_profile' => true }
+gitlab_rails['backup_upload_remote_directory'] = '${backup_bucket}'
+gitlab_rails['backup_keep_time'] = 86400
+
+## Metrics
+gitlab_rails['monitoring_whitelist'] = ['127.0.0.0/8', '${vpc_cidr}']
+%{ if prometheus_address != "" ~}
+gitlab_rails['prometheus_address'] = '${prometheus_address}'
+%{ endif ~}
+node_exporter['listen_address'] = '0.0.0.0:9100'
+gitlab_workhorse['prometheus_listen_addr'] = '0.0.0.0:9229'
+puma['exporter_enabled'] = true
+puma['exporter_address'] = '0.0.0.0'
+puma['exporter_port'] = 8083
+gitlab_exporter['listen_address'] = '0.0.0.0'
+gitlab_exporter['listen_port'] = '9168'
+EOF
+chmod 600 /etc/gitlab/gitlab.rb
+
+curl -fsSL https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash
+apt_install ${gitlab_package}
+
+wait_for_port "${postgres_endpoint}" 5432
+wait_for_port "${redis_sentinel_hosts[0]}" 26379
+
+# --- gitlab-secrets.json: identical on every Rails and Sidekiq node ------------
+if SECRETS_JSON=$(try_secret "${gitlab_secrets_secret_arn}"); then
+  echo "$SECRETS_JSON" > /etc/gitlab/gitlab-secrets.json
+  chmod 600 /etc/gitlab/gitlab-secrets.json
+  reconfigure
+%{ if is_primary ~}
+else
+  # First rails-1 ever: this reconfigure generates the file; share it.
+  reconfigure
+  aws secretsmanager put-secret-value --region "$REGION" --secret-id "${gitlab_secrets_secret_arn}" \
+    --secret-string file:///etc/gitlab/gitlab-secrets.json
+%{ else ~}
+else
+  until SECRETS_JSON=$(try_secret "${gitlab_secrets_secret_arn}"); do
+    echo "waiting for rails-1 to publish gitlab-secrets.json"
+    sleep 30
+  done
+  echo "$SECRETS_JSON" > /etc/gitlab/gitlab-secrets.json
+  chmod 600 /etc/gitlab/gitlab-secrets.json
+  reconfigure
+%{ endif ~}
+fi
+
+# --- Git over SSH through the NLB ----------------------------------------------
+# Same host key on every Rails node, and sshd asks GitLab for users' keys
+# instead of a per-node authorized_keys file.
+echo "$SSH_HOST_KEY_JSON" | jq -r .private > /etc/ssh/ssh_host_ed25519_key
+echo "$SSH_HOST_KEY_JSON" | jq -r .public > /etc/ssh/ssh_host_ed25519_key.pub
+chmod 600 /etc/ssh/ssh_host_ed25519_key
+chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
+cat > /etc/ssh/sshd_config.d/50-gitlab.conf <<'EOF'
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+Match User git
+  AuthorizedKeysCommand /opt/gitlab/embedded/service/gitlab-shell/bin/gitlab-shell-authorized-keys-check git %u %k
+  AuthorizedKeysCommandUser git
+Match all
+EOF
+sshd -t
+systemctl reload ssh || systemctl restart ssh
+
+%{ if is_primary ~}
+# --- One-off application setup (rails-1) ----------------------------------------
+gitlab-rails runner "ApplicationSetting.current.update!(authorized_keys_enabled: false)"
+
+# Instance runner shared by all runner machines; its token goes to Secrets Manager.
+if ! try_secret "${runner_token_secret_arn}" >/dev/null; then
+  RUNNER_TOKEN=$(gitlab-rails runner "
+    r = Ci::Runners::CreateRunnerService.new(
+      user: User.find_by_username('root'),
+      params: { runner_type: 'instance_type', description: 'aws-ec2-docker', run_untagged: true, tag_list: %w[docker aws] }
+    ).execute
+    raise r.message.to_s if r.error?
+    puts r.payload[:runner].token
+  " | grep -o 'glrt-[A-Za-z0-9_.-]*' | tail -1)
+  aws secretsmanager put-secret-value --region "$REGION" --secret-id "${runner_token_secret_arn}" \
+    --secret-string "$RUNNER_TOKEN"
+fi
+
+# Daily backup: database + repositories, uploaded to S3 (object storage is not
+# included; those buckets are versioned instead).
+cat > /etc/cron.d/gitlab-backup <<'EOF'
+${backup_cron} root /opt/gitlab/bin/gitlab-backup create CRON=1
+EOF
+chmod 644 /etc/cron.d/gitlab-backup
+%{ endif ~}
+
+echo "GitLab Rails bootstrap finished"
