@@ -61,3 +61,9 @@ variable "gitlab_buckets_force_destroy" {
   default     = false
   description = "Let `terraform destroy` delete non-empty GitLab buckets. true is handy for a throwaway demo."
 }
+
+variable "gitlab_version" {
+  type        = string
+  default     = ""
+  description = "GitLab CE package version for every GitLab node, e.g. \"18.6.0-ce.0\". Empty = newest at first boot; pin it so all nodes match."
+}
