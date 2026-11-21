@@ -4,7 +4,9 @@ Three Gitaly nodes that store the Git repositories. Only Praefect
 ([../praefect](../praefect/README.md)) talks to them, and it keeps a full copy
 of every repository on each node.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`count`, `instance_type`, `volume_size`).
+
+| | Value |
 |---|---|
 | Nodes | `gitaly-1..3`, one per AZ; also their storage names |
 | Instance | `m8i.large`, 200 GiB gp3 (repositories live on the root volume) |
@@ -47,7 +49,8 @@ and praefect modules.
 
 | Input | Meaning |
 |---|---|
-| `base`, `node_count`, `instance_type`, `volume_size` | Shared settings and size |
+| `base` | Shared settings (VPC, region, SSH key, VPN group) |
+| `private_subnet_ids` | Exactly 3 private subnets; nodes go one per subnet/AZ |
 | `gitlab_version` | GitLab CE package version (empty = newest) |
 | `gitlab_url`, `gitlab_ca_cert`, `gitlab_shell_secret_arn` | From the rails module |
 | `praefect_internal_token_secret_arn`, `praefect_security_group_id` | From the praefect module |
