@@ -1,0 +1,120 @@
+#!/bin/bash
+# Prometheus + Grafana bootstrap (rendered by Terraform, runs once at first boot).
+# Log: /var/log/cloud-init-output.log
+set -euo pipefail
+
+REGION="${region}"
+export PATH="$PATH:/snap/bin"
+
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$@"; }
+get_secret() {
+  for _ in $(seq 1 60); do
+    aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null && return 0
+    sleep 10
+  done
+  echo "could not read secret $1" >&2
+  return 1
+}
+
+hostnamectl set-hostname "${hostname}"
+echo "127.0.1.1 ${hostname}" >> /etc/hosts
+timedatectl set-timezone Etc/UTC
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install curl jq gnupg prometheus prometheus-node-exporter
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+GRAFANA_PASSWORD=$(get_secret "${grafana_admin_secret_arn}")
+
+# --- Prometheus: EC2 service discovery on this project's Role tags -------------
+cat > /etc/prometheus/prometheus.yml <<'EOF'
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: node
+    ec2_sd_configs:
+      - region: ${region}
+        port: 9100
+        filters:
+          - { name: "tag:Project", values: ["${project_name}"] }
+          - { name: "tag:Environment", values: ["${environment}"] }
+          - { name: "instance-state-name", values: ["running"] }
+    relabel_configs:
+      - { source_labels: [__meta_ec2_tag_Name], target_label: instance }
+      - { source_labels: [__meta_ec2_tag_Role], target_label: role }
+%{ for job in scrape_jobs ~}
+
+  - job_name: ${job.name}
+    metrics_path: ${job.path}
+%{ if job.params != "" ~}
+    params: { ${job.params} }
+%{ endif ~}
+    ec2_sd_configs:
+      - region: ${region}
+        port: ${job.port}
+        filters:
+          - { name: "tag:Project", values: ["${project_name}"] }
+          - { name: "tag:Environment", values: ["${environment}"] }
+          - { name: "tag:Role", values: ["${job.role}"] }
+          - { name: "instance-state-name", values: ["running"] }
+    relabel_configs:
+      - { source_labels: [__meta_ec2_tag_Name], target_label: instance }
+%{ endfor ~}
+EOF
+sed -i 's|^ARGS=.*|ARGS="--storage.tsdb.retention.time=${retention}"|' /etc/default/prometheus
+promtool check config /etc/prometheus/prometheus.yml
+systemctl restart prometheus
+systemctl enable prometheus
+
+# --- Grafana --------------------------------------------------------------------
+curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /usr/share/keyrings/grafana.gpg
+echo "deb [signed-by=/usr/share/keyrings/grafana.gpg] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install grafana
+
+# Read only when Grafana creates its database, i.e. on this very first start.
+install -d -m 755 /etc/systemd/system/grafana-server.service.d
+cat > /etc/systemd/system/grafana-server.service.d/admin.conf <<EOF
+[Service]
+Environment=GF_SECURITY_ADMIN_PASSWORD=$GRAFANA_PASSWORD
+EOF
+chmod 600 /etc/systemd/system/grafana-server.service.d/admin.conf
+
+cat > /etc/grafana/provisioning/datasources/prometheus.yml <<'EOF'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9090
+    isDefault: true
+EOF
+
+cat > /etc/grafana/provisioning/dashboards/files.yml <<'EOF'
+apiVersion: 1
+providers:
+  - name: files
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
+EOF
+
+# "Node Exporter Full" dashboard, wired to the Prometheus data source above.
+install -d -o grafana -g grafana -m 755 /var/lib/grafana/dashboards
+curl -fsSL https://grafana.com/api/dashboards/1860/revisions/latest/download \
+  | sed -E 's/\$\{DS_PROMETHEUS\}|\$\{ds_prometheus\}/prometheus/g' \
+  > /var/lib/grafana/dashboards/node-exporter-full.json
+chown grafana:grafana /var/lib/grafana/dashboards/node-exporter-full.json
+
+systemctl daemon-reload
+systemctl enable --now grafana-server
+
+echo "Monitoring bootstrap finished"
