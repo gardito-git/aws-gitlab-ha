@@ -1,0 +1,122 @@
+#!/bin/bash
+# Sidekiq node bootstrap (rendered by Terraform, runs once at first boot).
+# Log: /var/log/cloud-init-output.log
+set -euo pipefail
+
+REGION="${region}"
+export PATH="$PATH:/snap/bin"
+
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$@"; }
+get_secret() {
+  for _ in $(seq 1 60); do
+    aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null && return 0
+    sleep 10
+  done
+  echo "could not read secret $1" >&2
+  return 1
+}
+try_secret() { aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null; }
+reconfigure() {
+  for attempt in $(seq 1 20); do
+    gitlab-ctl reconfigure && return 0
+    echo "reconfigure failed (attempt $attempt), retrying in 30 s"
+    sleep 30
+  done
+  return 1
+}
+
+hostnamectl set-hostname "${hostname}"
+echo "127.0.1.1 ${hostname}" >> /etc/hosts
+timedatectl set-timezone Etc/UTC
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install curl jq
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+SHELL_TOKEN=$(get_secret "${gitlab_shell_secret_arn}")
+DB_PASSWORD=$(get_secret "${gitlab_db_secret_arn}")
+REDIS_PASSWORD=$(get_secret "${redis_password_secret_arn}")
+PRAEFECT_TOKEN=$(get_secret "${praefect_external_token_secret_arn}")
+
+install -d -m 755 /etc/gitlab /etc/gitlab/trusted-certs
+touch /etc/gitlab/skip-auto-reconfigure
+
+%{ if gitlab_ca_cert != "" ~}
+cat > /etc/gitlab/trusted-certs/gitlab-ca.crt <<'EOF'
+${gitlab_ca_cert}
+EOF
+cp /etc/gitlab/trusted-certs/gitlab-ca.crt /usr/local/share/ca-certificates/gitlab-ca.crt
+update-ca-certificates
+%{ endif ~}
+
+cat > /etc/gitlab/gitlab.rb <<EOF
+# Sidekiq node: background jobs only. Written by the first-boot script.
+external_url '${gitlab_url}'
+
+postgresql['enable'] = false
+redis['enable'] = false
+gitaly['enable'] = false
+praefect['enable'] = false
+puma['enable'] = false
+nginx['enable'] = false
+gitlab_workhorse['enable'] = false
+gitlab_exporter['enable'] = false
+prometheus['enable'] = false
+alertmanager['enable'] = false
+postgres_exporter['enable'] = false
+redis_exporter['enable'] = false
+gitlab_kas['enable'] = false
+gitlab_rails['gitlab_kas_enabled'] = false
+letsencrypt['enable'] = false
+gitlab_rails['auto_migrate'] = false
+
+sidekiq['enable'] = true
+sidekiq['listen_address'] = '0.0.0.0'          # metrics on :8082
+sidekiq['queue_groups'] = ['*'] * $(nproc)     # one process per vCPU
+sidekiq['max_concurrency'] = ${max_concurrency}
+
+gitlab_rails['db_host'] = '${postgres_endpoint}'
+gitlab_rails['db_port'] = 5432
+gitlab_rails['db_database'] = 'gitlabhq_production'
+gitlab_rails['db_username'] = 'gitlab'
+gitlab_rails['db_password'] = '$DB_PASSWORD'
+
+redis['master_name'] = '${redis_master_name}'
+redis['master_password'] = '$REDIS_PASSWORD'
+gitlab_rails['redis_sentinels'] = [
+%{ for host in redis_sentinel_hosts ~}
+  { 'host' => '${host}', 'port' => 26379 },
+%{ endfor ~}
+]
+
+gitlab_rails['repositories_storages'] = {
+  'default' => { 'gitaly_address' => 'tcp://${praefect_endpoint}:2305', 'gitaly_token' => '$PRAEFECT_TOKEN' },
+}
+gitlab_shell['secret_token'] = '$SHELL_TOKEN'
+
+gitlab_rails['object_store']['enabled'] = true
+gitlab_rails['object_store']['proxy_download'] = true
+gitlab_rails['object_store']['connection'] = { 'provider' => 'AWS', 'region' => '$REGION', 'use_iam_profile' => true }
+%{ for type, bucket in object_buckets ~}
+gitlab_rails['object_store']['objects']['${replace(type, "-", "_")}']['bucket'] = '${bucket}'
+%{ endfor ~}
+
+node_exporter['listen_address'] = '0.0.0.0:9100'
+EOF
+chmod 600 /etc/gitlab/gitlab.rb
+
+curl -fsSL https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash
+apt_install ${gitlab_package}
+
+# rails-1 publishes gitlab-secrets.json after its first reconfigure (and the
+# database migrations) are done.
+until SECRETS_JSON=$(try_secret "${gitlab_secrets_secret_arn}"); do
+  echo "waiting for rails-1 to publish gitlab-secrets.json"
+  sleep 30
+done
+echo "$SECRETS_JSON" > /etc/gitlab/gitlab-secrets.json
+chmod 600 /etc/gitlab/gitlab-secrets.json
+reconfigure
+
+echo "Sidekiq bootstrap finished"
