@@ -1,0 +1,91 @@
+#!/bin/bash
+# Gitaly node bootstrap (rendered by Terraform, runs once at first boot).
+# Log: /var/log/cloud-init-output.log
+set -euo pipefail
+
+REGION="${region}"
+export PATH="$PATH:/snap/bin"
+
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$@"; }
+get_secret() {
+  for _ in $(seq 1 60); do
+    aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null && return 0
+    sleep 10
+  done
+  echo "could not read secret $1" >&2
+  return 1
+}
+
+hostnamectl set-hostname "${hostname}"
+echo "127.0.1.1 ${hostname}" >> /etc/hosts
+timedatectl set-timezone Etc/UTC
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install curl jq
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+SHELL_TOKEN=$(get_secret "${gitlab_shell_secret_arn}")
+INTERNAL_TOKEN=$(get_secret "${internal_token_secret_arn}")
+
+# Everything is in place before the package is installed, with
+# skip-auto-reconfigure, so the package never starts an all-in-one GitLab.
+install -d -m 755 /etc/gitlab /etc/gitlab/trusted-certs
+touch /etc/gitlab/skip-auto-reconfigure
+
+%{ if gitlab_ca_cert != "" ~}
+# Self-signed GitLab certificate: trust its CA (git hooks call the API over HTTPS).
+cat > /etc/gitlab/trusted-certs/gitlab-ca.crt <<'EOF'
+${gitlab_ca_cert}
+EOF
+cp /etc/gitlab/trusted-certs/gitlab-ca.crt /usr/local/share/ca-certificates/gitlab-ca.crt
+update-ca-certificates
+%{ endif ~}
+
+cat > /etc/gitlab/gitlab.rb <<EOF
+# Gitaly storage node behind Praefect. Written by the first-boot script.
+postgresql['enable'] = false
+redis['enable'] = false
+nginx['enable'] = false
+puma['enable'] = false
+sidekiq['enable'] = false
+gitlab_workhorse['enable'] = false
+prometheus['enable'] = false
+alertmanager['enable'] = false
+gitlab_exporter['enable'] = false
+postgres_exporter['enable'] = false
+redis_exporter['enable'] = false
+gitlab_kas['enable'] = false
+letsencrypt['enable'] = false
+gitlab_rails['auto_migrate'] = false
+
+# Git hooks call GitLab's internal API through the frontend NLB.
+gitlab_rails['internal_api_url'] = '${gitlab_url}'
+gitlab_shell['secret_token'] = '$SHELL_TOKEN'
+
+node_exporter['listen_address'] = '0.0.0.0:9100'
+
+gitaly['configuration'] = {
+  listen_addr: '0.0.0.0:8075',
+  prometheus_listen_addr: '0.0.0.0:9236',
+  auth: {
+    token: '$INTERNAL_TOKEN',
+  },
+  pack_objects_cache: {
+    enabled: true,
+  },
+  storage: [
+    {
+      name: '${storage_name}',
+      path: '/var/opt/gitlab/git-data/repositories',
+    },
+  ],
+}
+EOF
+chmod 600 /etc/gitlab/gitlab.rb
+
+curl -fsSL https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash
+apt_install ${gitlab_package}
+gitlab-ctl reconfigure
+
+echo "Gitaly bootstrap finished"
