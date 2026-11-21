@@ -27,19 +27,19 @@ private IP from your laptop with the OpenVPN desktop app.
 1. Add yourself to `vpn_client_names` in `terraform.tfvars` (one profile is created per name), then apply:
 
    ```hcl
-   vpn_client_names = ["gardito"]
+   vpn_client_names = ["user"]
    ```
 
 2. Save your profile. It contains your private key, so keep it out of git
    (`*.ovpn` is in `.gitignore`):
 
    ```bash
-   terraform output -json vpn_client_configs | jq -r '.gardito' > gardito.ovpn
+   terraform output -json vpn_client_configs | jq -r '.user' > user.ovpn
    ```
 
    No `jq`? Run `terraform output vpn_client_configs` and copy your entry into a file.
 
-3. Import `gardito.ovpn` into **OpenVPN Connect** (or OpenVPN GUI / Tunnelblick) and connect.
+3. Import `user.ovpn` into **OpenVPN Connect** (or OpenVPN GUI / Tunnelblick) and connect.
 
 4. SSH to any node by its private IP:
 
