@@ -6,7 +6,7 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
-    # Generates the cluster passwords (gitlab/secrets.tf).
+    # Generates passwords
     random = {
       source  = "hashicorp/random"
       version = "~> 3.0"
@@ -16,7 +16,7 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
-    # Writes the Ansible inventory (gitlab/ansible-inventory.tf).
+    # For Ansible
     local = {
       source  = "hashicorp/local"
       version = "~> 2.5"
