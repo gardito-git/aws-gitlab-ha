@@ -1,0 +1,87 @@
+#!/bin/bash
+# Redis + Sentinel node bootstrap (rendered by Terraform, runs once at first boot).
+# Log: /var/log/cloud-init-output.log
+#
+# Redis and Sentinel rewrite their own config files after a failover, which is
+# why the files are written only here, once.
+set -euo pipefail
+
+REGION="${region}"
+export PATH="$PATH:/snap/bin"
+
+imds() {
+  local token
+  token=$(curl -sfX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+  curl -sf -H "X-aws-ec2-metadata-token: $token" "http://169.254.169.254/latest/meta-data/$1"
+}
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$@"; }
+get_secret() {
+  for _ in $(seq 1 60); do
+    aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null && return 0
+    sleep 10
+  done
+  echo "could not read secret $1" >&2
+  return 1
+}
+
+hostnamectl set-hostname "${hostname}"
+echo "127.0.1.1 ${hostname}" >> /etc/hosts
+timedatectl set-timezone Etc/UTC
+PRIVATE_IP=$(imds local-ipv4)
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install curl jq redis-server redis-sentinel prometheus-redis-exporter prometheus-node-exporter
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+REDIS_PASSWORD=$(get_secret "${password_secret_arn}")
+
+cat > /etc/redis/redis.conf <<EOF
+bind 0.0.0.0
+protected-mode no
+port 6379
+daemonize no
+supervised systemd
+pidfile /run/redis/redis-server.pid
+loglevel notice
+logfile /var/log/redis/redis-server.log
+dir /var/lib/redis
+save 900 1
+save 300 10
+appendonly yes
+requirepass $REDIS_PASSWORD
+masterauth $REDIS_PASSWORD
+replica-announce-ip $PRIVATE_IP
+EOF
+%{ if !is_initial_primary ~}
+echo "replicaof ${initial_primary_ip} 6379" >> /etc/redis/redis.conf
+%{ endif ~}
+
+cat > /etc/redis/sentinel.conf <<EOF
+port 26379
+bind 0.0.0.0
+protected-mode no
+daemonize no
+supervised systemd
+pidfile /run/sentinel/redis-sentinel.pid
+logfile /var/log/redis/redis-sentinel.log
+dir /var/lib/redis
+sentinel announce-ip $PRIVATE_IP
+sentinel monitor ${master_name} ${initial_primary_ip} 6379 2
+sentinel auth-pass ${master_name} $REDIS_PASSWORD
+sentinel down-after-milliseconds ${master_name} 10000
+sentinel failover-timeout ${master_name} 60000
+sentinel parallel-syncs ${master_name} 1
+EOF
+chown redis:redis /etc/redis/redis.conf /etc/redis/sentinel.conf
+chmod 640 /etc/redis/redis.conf /etc/redis/sentinel.conf
+
+cat > /etc/default/prometheus-redis-exporter <<EOF
+ARGS="-redis.addr=redis://127.0.0.1:6379"
+REDIS_PASSWORD=$REDIS_PASSWORD
+EOF
+chmod 600 /etc/default/prometheus-redis-exporter
+
+systemctl restart redis-server redis-sentinel prometheus-redis-exporter
+systemctl enable redis-server redis-sentinel prometheus-redis-exporter
+echo "Redis bootstrap finished"
