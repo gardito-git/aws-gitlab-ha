@@ -4,9 +4,11 @@ Three Redis nodes (one primary, two replicas), with a Sentinel on each. GitLab
 asks the Sentinels which node is the primary, so a failover needs no config
 change on the GitLab side.
 
-Highly recommended use existing Redis Sentinel/Cluster for saving cost.
+If you already have a Redis Sentinel setup or cluster, using it is highly recommended to save cost.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`count`, `instance_type`, `volume_size`, and the Sentinel `master_name` in `locals`).
+
+| | Value |
 |---|---|
 | Nodes | `redis-1..3`, one per AZ |
 | Instance | `r8i.large`, 50 GiB gp3 |
@@ -49,8 +51,8 @@ Highly recommended use existing Redis Sentinel/Cluster for saving cost.
 
 | Input | Meaning |
 |---|---|
-| `base`, `node_count`, `instance_type`, `volume_size` | Shared settings and size (keep 3+ nodes) |
-| `master_name` | Name the Sentinels monitor |
+| `base` | Shared settings (VPC, region, SSH key, VPN group) |
+| `private_subnet_ids` | Exactly 3 private subnets; nodes go one per subnet/AZ |
 | `client_security_group_ids` | Who may connect, e.g. `{ rails, sidekiq }` |
 | `monitoring_security_group_id` | Allowed to scrape metrics |
 
