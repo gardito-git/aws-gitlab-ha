@@ -1,14 +1,14 @@
 output "security_group_id" {
-  value = aws_security_group.this.id
+  value = aws_security_group.redis_sg.id
 }
 
 output "sentinel_hosts" {
   description = "Sentinel addresses (port 26379) for GitLab's redis_sentinels"
-  value       = [for name in sort(keys(local.nodes)) : aws_network_interface.this[name].private_ip]
+  value       = aws_network_interface.redis_eni[*].private_ip
 }
 
 output "master_name" {
-  value = var.master_name
+  value = local.master_name
 }
 
 output "password_secret_arn" {
@@ -16,5 +16,5 @@ output "password_secret_arn" {
 }
 
 output "private_ips" {
-  value = { for name, eni in aws_network_interface.this : name => eni.private_ip }
+  value = { for i, eni in aws_network_interface.redis_eni : "redis-${i + 1}" => eni.private_ip }
 }

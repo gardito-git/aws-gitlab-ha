@@ -7,44 +7,39 @@
 
 locals {
   name_suffix = "${var.base.project_name}-${var.base.environment}"
-
-  nodes = {
-    for i in range(var.node_count) : "redis-${i + 1}" => {
-      subnet_id = var.base.subnet_ids[i % length(var.base.subnet_ids)]
-    }
-  }
+  master_name = "gitlab-redis" # name the Sentinels monitor; GitLab asks for the primary by it
 }
 
 data "aws_ssm_parameter" "ubuntu" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 }
 
-resource "aws_key_pair" "this" {
+resource "aws_key_pair" "redis_key" {
   key_name   = "gitlab-redis-${local.name_suffix}"
   public_key = var.base.ssh_public_key
 }
 
-resource "aws_network_interface" "this" {
-  for_each = local.nodes
+resource "aws_network_interface" "redis_eni" {
+  count = 3 # one per node below
 
-  subnet_id       = each.value.subnet_id
-  security_groups = [aws_security_group.this.id]
+  subnet_id       = var.private_subnet_ids[count.index]
+  security_groups = [aws_security_group.redis_sg.id]
 
   tags = {
-    Name = "gitlab-${each.key}-${local.name_suffix}"
+    Name = "gitlab-redis-${count.index + 1}-${local.name_suffix}"
   }
 }
 
-resource "aws_instance" "this" {
-  for_each = local.nodes
+resource "aws_instance" "redis" {
+  count = 3 # redis-1..3, one per private subnet/AZ
 
   ami                  = data.aws_ssm_parameter.ubuntu.insecure_value
-  instance_type        = var.instance_type
-  key_name             = aws_key_pair.this.key_name
-  iam_instance_profile = aws_iam_instance_profile.this.name
+  instance_type        = "r8i.large" # 2 vCPU 16 GiB RAM
+  key_name             = aws_key_pair.redis_key.key_name
+  iam_instance_profile = aws_iam_instance_profile.redis.name
 
   primary_network_interface {
-    network_interface_id = aws_network_interface.this[each.key].id
+    network_interface_id = aws_network_interface.redis_eni[count.index].id
   }
 
   metadata_options {
@@ -55,21 +50,21 @@ resource "aws_instance" "this" {
 
   root_block_device {
     volume_type = "gp3"
-    volume_size = var.volume_size
+    volume_size = 50
     encrypted   = true
   }
 
   user_data_base64 = base64gzip(templatefile("${path.module}/scripts/user-data.sh.tftpl", {
-    hostname            = "gitlab-${each.key}"
+    hostname            = "gitlab-redis-${count.index + 1}"
     region              = var.base.region
-    master_name         = var.master_name
-    initial_primary_ip  = aws_network_interface.this["redis-1"].private_ip
-    is_initial_primary  = each.key == "redis-1"
+    master_name         = local.master_name
+    initial_primary_ip  = aws_network_interface.redis_eni[0].private_ip
+    is_initial_primary  = count.index == 0
     password_secret_arn = aws_secretsmanager_secret.password.arn
   }))
 
   tags = {
-    Name = "gitlab-${each.key}-${local.name_suffix}"
+    Name = "gitlab-redis-${count.index + 1}-${local.name_suffix}"
     Role = "redis"
   }
 

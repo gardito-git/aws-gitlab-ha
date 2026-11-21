@@ -14,26 +14,14 @@ variable "base" {
   description = "Settings shared by every role module (local.base in the root main.tf)"
 }
 
-variable "node_count" {
-  type        = number
-  default     = 3
-  description = "Redis nodes, each with a Sentinel. Keep 3+ so Sentinels can reach a quorum."
-}
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnets, one node per subnet/AZ (module.vpc.private_subnet_ids)"
 
-variable "instance_type" {
-  type    = string
-  default = "r8i.large"
-}
-
-variable "volume_size" {
-  type    = number
-  default = 50
-}
-
-variable "master_name" {
-  type        = string
-  default     = "gitlab-redis"
-  description = "Name the Sentinels monitor; GitLab asks for the primary by this name"
+  validation {
+    condition     = length(var.private_subnet_ids) == 3
+    error_message = "Exactly 3 private subnets are needed: one Redis node per AZ, and the Sentinels need 3 for a quorum."
+  }
 }
 
 variable "monitoring_security_group_id" {
