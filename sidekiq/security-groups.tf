@@ -1,4 +1,4 @@
-resource "aws_security_group" "this" {
+resource "aws_security_group" "sidekiq_sg" {
   name        = "gitlab-sidekiq-${local.name_suffix}"
   description = "GitLab Sidekiq nodes"
   vpc_id      = var.base.vpc_id
@@ -16,10 +16,10 @@ locals {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "this" {
+resource "aws_vpc_security_group_ingress_rule" "sidekiq_sg_ingress" {
   for_each = local.ingress
 
-  security_group_id            = aws_security_group.this.id
+  security_group_id            = aws_security_group.sidekiq_sg.id
   referenced_security_group_id = each.value.from
   ip_protocol                  = "tcp"
   from_port                    = each.value.port
@@ -27,8 +27,8 @@ resource "aws_vpc_security_group_ingress_rule" "this" {
   description                  = each.value.description
 }
 
-resource "aws_vpc_security_group_egress_rule" "all" {
-  security_group_id = aws_security_group.this.id
+resource "aws_vpc_security_group_egress_rule" "sidekiq_sg_egress_all" {
+  security_group_id = aws_security_group.sidekiq_sg.id
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
   description       = "All outbound (apt, PostgreSQL, Redis, Praefect, S3, AWS APIs)"

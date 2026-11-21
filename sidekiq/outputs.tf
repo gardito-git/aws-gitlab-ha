@@ -1,7 +1,7 @@
 output "security_group_id" {
-  value = aws_security_group.this.id
+  value = aws_security_group.sidekiq_sg.id
 }
 
 output "private_ips" {
-  value = { for name, i in aws_instance.this : name => i.private_ip }
+  value = { for i, node in aws_instance.sidekiq : "sidekiq-${i + 1}" => node.private_ip }
 }

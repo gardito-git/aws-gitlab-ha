@@ -14,25 +14,14 @@ variable "base" {
   description = "Settings shared by every role module (local.base in the root main.tf)"
 }
 
-variable "node_count" {
-  type    = number
-  default = 3
-}
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnets, one node per subnet/AZ (module.vpc.private_subnet_ids)"
 
-variable "instance_type" {
-  type    = string
-  default = "m8i.large"
-}
-
-variable "volume_size" {
-  type    = number
-  default = 50
-}
-
-variable "max_concurrency" {
-  type        = number
-  default     = 10
-  description = "Threads per Sidekiq process. Kept modest: no PgBouncer, every thread holds DB connections."
+  validation {
+    condition     = length(var.private_subnet_ids) == 3
+    error_message = "Exactly 3 private subnets are needed: one Sidekiq node per AZ."
+  }
 }
 
 variable "gitlab_version" {
