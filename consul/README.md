@@ -4,7 +4,9 @@ Three Consul servers. Patroni ([../postgres](../postgres/README.md)) uses them
 as its leader-election store: whoever holds the Consul lock is the PostgreSQL
 primary. Nothing else in the cluster uses Consul.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`count`, `instance_type`, `volume_size`).
+
+| | Value |
 |---|---|
 | Nodes | `consul-1..3`, one per AZ |
 | Instance | `c8i.large`, 30 GiB gp3 |
@@ -27,7 +29,7 @@ primary. Nothing else in the cluster uses Consul.
   so no IP addresses are hard-coded.
 - Gossip traffic is encrypted with the key from `secret-manager.tf`. The
   PostgreSQL agents read the same key.
-- `bootstrap_expect = node_count`, so the servers elect a leader once all of them are up.
+- `bootstrap_expect = 3` (the instance `count`), so the servers elect a leader once all of them are up.
 
 ## Ports
 
@@ -43,7 +45,7 @@ primary. Nothing else in the cluster uses Consul.
 | Input | Meaning |
 |---|---|
 | `base` | Shared settings (VPC, subnets, SSH key, VPN group) |
-| `node_count`, `instance_type`, `volume_size` | Size; keep `node_count` odd (3 or 5) |
+| `private_subnet_ids` | Exactly 3 private subnets; nodes go one per subnet/AZ |
 | `monitoring_security_group_id` | Allowed to scrape metrics |
 | `agent_security_group_ids` | Groups running agents, e.g. `{ postgres = ... }` |
 
