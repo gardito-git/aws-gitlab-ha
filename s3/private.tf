@@ -1,0 +1,178 @@
+# General-purpose private bucket: logs, backups, uploads, anything that must
+# never be public. Organise it with key prefixes ("folders"):
+#   logs/                deleted after var.log_retention_days
+#   backups/kubernetes/  etcd snapshots, deleted after var.backup_retention_days
+#   backups/postgres/    pgBackRest repository; pgBackRest deletes old backups itself
+#   backups/redis/       daily RDB snapshots, deleted after var.backup_retention_days
+#   backups/elasticsearch/ snapshot repository; Elasticsearch (SLM) deletes old snapshots itself
+#   backups/rabbitmq/    daily definitions exports, deleted after var.backup_retention_days
+#   backups/mongodb/     daily mongodump archives, deleted after var.backup_retention_days
+#   tmp/                 deleted after 7 days
+#   anything else (uploads/, web/, ...) is kept until someone deletes it.
+
+data "aws_caller_identity" "current" {}
+
+locals {
+  name_prefix = "${var.project_name}-${var.environment}"
+
+  # Bucket names are global across ALL AWS accounts. Adding the account ID
+  # makes a collision with somebody else's bucket practically impossible.
+  account_id = data.aws_caller_identity.current.account_id
+}
+
+resource "aws_s3_bucket" "private" {
+  bucket = "${local.name_prefix}-private"
+
+  # `terraform destroy` fails while the bucket holds objects, instead of
+  # deleting backups silently. Empty it by hand if you really mean it.
+  force_destroy = false
+
+  tags = {
+    Name = "${local.name_prefix}-private"
+  }
+}
+
+# ACLs disabled: only IAM and bucket policies decide access. This is the AWS
+# default for new buckets and the reason ACL settings are not used anywhere here.
+resource "aws_s3_bucket_ownership_controls" "private" {
+  bucket = aws_s3_bucket.private.id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "private" {
+  bucket = aws_s3_bucket.private.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "private" {
+  bucket = aws_s3_bucket.private.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# Versioning keeps the previous copy when an object is overwritten or deleted,
+# so a bad script or an accidental `aws s3 rm --recursive` can be undone.
+# Old versions are cleaned up by the lifecycle rules below.
+resource "aws_s3_bucket_versioning" "private" {
+  bucket = aws_s3_bucket.private.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# S3 has no real folders; a prefix appears once something is written under it.
+# These empty "folder" objects (what the S3 console's "Create folder" makes) only
+# make the backup layout visible before the first backup runs.
+resource "aws_s3_object" "backup_folders" {
+  for_each = toset([
+    "logs/",
+    "backups/postgres/",
+    "tmp/"
+  ])
+
+  bucket  = aws_s3_bucket.private.id
+  key     = each.value
+  content = ""
+}
+
+locals {
+  # prefix => days until objects under it are deleted.
+  # backups/postgres/ and backups/elasticsearch/ are deliberately NOT here: their
+  # tools decide which files are still needed. pgBackRest keeps an old full backup
+  # and the WAL newer backups depend on; Elasticsearch snapshots share unchanged
+  # segment files with older snapshots. Deleting by age would break restores.
+  private_expiring_prefixes = {
+    "logs/"             = 30
+    "backups/postgres/" = 30
+    "backups/redis/"    = 30
+    "tmp/"              = 7
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "private" {
+  bucket = aws_s3_bucket.private.id
+
+  dynamic "rule" {
+    for_each = local.private_expiring_prefixes
+
+    content {
+      id     = "expire-${replace(trimsuffix(rule.key, "/"), "/", "-")}"
+      status = "Enabled"
+
+      # Only objects bigger than 0 bytes, so the empty folder objects above stay.
+      filter {
+        and {
+          prefix                   = rule.key
+          object_size_greater_than = 0
+        }
+      }
+
+      expiration {
+        days = rule.value
+      }
+    }
+  }
+
+  # Applies to the whole bucket: recoverable old versions, then gone for good.
+  rule {
+    id     = "cleanup-old-versions"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.noncurrent_version_retention_days
+    }
+
+    # Remove "delete markers" left behind once all versions of an object are gone.
+    expiration {
+      expired_object_delete_marker = true
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  # Lifecycle rules apply to versions only once versioning is on.
+  depends_on = [aws_s3_bucket_versioning.private]
+}
+
+data "aws_iam_policy_document" "private" {
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.private.arn, "${aws_s3_bucket.private.arn}/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "private" {
+  bucket = aws_s3_bucket.private.id
+  policy = data.aws_iam_policy_document.private.json
+
+  depends_on = [aws_s3_bucket_public_access_block.private]
+}
