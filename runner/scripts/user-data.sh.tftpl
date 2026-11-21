@@ -1,0 +1,56 @@
+#!/bin/bash
+# GitLab Runner bootstrap (rendered by Terraform, runs once at first boot).
+# Log: /var/log/cloud-init-output.log
+set -euo pipefail
+
+REGION="${region}"
+export PATH="$PATH:/snap/bin"
+
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$@"; }
+try_secret() { aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null; }
+
+hostnamectl set-hostname "${hostname}"
+echo "127.0.1.1 ${hostname}" >> /etc/hosts
+timedatectl set-timezone Etc/UTC
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install curl jq docker.io prometheus-node-exporter
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+curl -fsSL https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh | bash
+apt_install gitlab-runner
+
+%{ if gitlab_ca_cert != "" ~}
+# The runner picks up certs/<host>.crt by itself and hands it to jobs
+# (CI_SERVER_TLS_CA_FILE), so git clone trusts the self-signed certificate.
+install -d -m 755 /etc/gitlab-runner/certs
+cat > /etc/gitlab-runner/certs/${gitlab_host}.crt <<'EOF'
+${gitlab_ca_cert}
+EOF
+%{ endif ~}
+
+# rails-1 creates the instance runner once GitLab is up.
+until RUNNER_TOKEN=$(try_secret "${runner_token_secret_arn}"); do
+  echo "waiting for rails-1 to publish the runner token"
+  sleep 30
+done
+
+# GitLab is behind the NLB; wait until it answers before registering.
+until curl -sf -o /dev/null "${gitlab_url}/-/readiness" || curl -sf -o /dev/null --cacert "/etc/gitlab-runner/certs/${gitlab_host}.crt" "${gitlab_url}/-/readiness"; do
+  echo "waiting for ${gitlab_url}"
+  sleep 15
+done
+
+gitlab-runner register --non-interactive \
+  --url "${gitlab_url}" \
+  --token "$RUNNER_TOKEN" \
+  --name "${hostname}" \
+  --executor docker \
+  --docker-image "${default_image}"
+
+sed -i 's/^concurrent = .*/concurrent = ${concurrent}/' /etc/gitlab-runner/config.toml
+sed -i '/^concurrent = /a listen_address = ":9252"' /etc/gitlab-runner/config.toml
+systemctl restart gitlab-runner
+
+echo "GitLab Runner bootstrap finished"
