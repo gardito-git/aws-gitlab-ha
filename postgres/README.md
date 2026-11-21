@@ -4,9 +4,12 @@ Three PostgreSQL 17 nodes managed by Patroni, with an internal NLB that
 always points at the current primary. It holds GitLab's database
 (`gitlabhq_production`) and Praefect's (`praefect_production`).
 
-If you have existing/dedicated Postgres, just create database to saving cost. But if your CEO/CTO want to separate things, then maybe this is help.
+If you already have an existing or dedicated PostgreSQL, just create the databases there to save cost. But if your CEO/CTO wants things separated, this module may help.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`count`, `instance_type`, `volume_size`,
+`postgres_version`, `max_connections`).
+
+| | Value |
 |---|---|
 | Nodes | `postgres-1..3`, one per AZ |
 | Instance | `r8i.large` (2 vCPU, 16 GiB), 100 GiB gp3 |
@@ -69,8 +72,8 @@ The NLB itself accepts 5432 only from `client_security_group_ids` (rails, sideki
 
 | Input | Meaning |
 |---|---|
-| `base`, `node_count`, `instance_type`, `volume_size` | Shared settings and size |
-| `postgres_version` (17), `max_connections` (500) | Database settings |
+| `base` | Shared settings (VPC, region, SSH key, VPN group) |
+| `private_subnet_ids` | Exactly 3 private subnets; one node per subnet/AZ |
 | `consul_security_group_id`, `consul_join_tag`, `consul_gossip_secret_arn` | From the consul module |
 | `client_security_group_ids` | Who may use the NLB |
 | `monitoring_security_group_id` | Allowed to scrape metrics |
