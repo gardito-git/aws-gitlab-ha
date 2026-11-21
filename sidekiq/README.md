@@ -4,7 +4,9 @@ Three Sidekiq nodes that run GitLab's background jobs: CI pipeline
 processing, emails, webhooks, repository housekeeping and more. They use the
 same database, Redis, Gitaly and S3 as Rails, but serve no web traffic.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`count`, `instance_type`, `volume_size`, `max_concurrency`).
+
+| | Value |
 |---|---|
 | Nodes | `sidekiq-1..3`, one per AZ |
 | Instance | `m8i.large`, 50 GiB gp3 |
@@ -30,7 +32,7 @@ module (rails, postgres, redis, praefect).
   `gitlab-secrets.json`, which happens after the database migrations. It then
   installs that file and reconfigures, so its encryption keys match Rails'.
 - **Concurrency is kept modest.** There is no PgBouncer, so every Sidekiq
-  thread holds real PostgreSQL connections. Raise `max_concurrency` only
+  thread holds real PostgreSQL connections. Raise `max_concurrency` (in `compute.tf`) only
   together with PostgreSQL's `max_connections`.
 - **Talks to nobody inbound.** Sidekiq only makes outbound connections, so its
   security group only opens SSH and metrics.
@@ -46,8 +48,9 @@ module (rails, postgres, redis, praefect).
 
 | Input | Meaning |
 |---|---|
-| `base`, `node_count`, `instance_type`, `volume_size` | Shared settings and size |
-| `max_concurrency`, `gitlab_version` | Sidekiq settings |
+| `base` | Shared settings (VPC, region, SSH key, VPN group) |
+| `private_subnet_ids` | Exactly 3 private subnets; nodes go one per subnet/AZ |
+| `gitlab_version` | GitLab CE package version (empty = newest) |
 | `gitlab_url`, `gitlab_ca_cert`, `gitlab_shell_secret_arn`, `gitlab_secrets_json_secret_arn` | From rails |
 | `postgres_endpoint`, `gitlab_db_secret_arn` | From postgres |
 | `redis_sentinel_hosts`, `redis_master_name`, `redis_password_secret_arn` | From redis |
