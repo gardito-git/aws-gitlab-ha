@@ -1,0 +1,201 @@
+#!/bin/bash
+# PostgreSQL + Patroni node bootstrap (rendered by Terraform, runs once at first boot).
+# Log: /var/log/cloud-init-output.log
+set -euo pipefail
+
+REGION="${region}"
+PG_VERSION="${postgres_version}"
+export PATH="$PATH:/snap/bin"
+
+imds() {
+  local token
+  token=$(curl -sfX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+  curl -sf -H "X-aws-ec2-metadata-token: $token" "http://169.254.169.254/latest/meta-data/$1"
+}
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$@"; }
+get_secret() {
+  for _ in $(seq 1 60); do
+    aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null && return 0
+    sleep 10
+  done
+  echo "could not read secret $1" >&2
+  return 1
+}
+
+hostnamectl set-hostname "${hostname}"
+echo "127.0.1.1 ${hostname}" >> /etc/hosts
+timedatectl set-timezone Etc/UTC
+PRIVATE_IP=$(imds local-ipv4)
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install curl jq gnupg python3-venv postgresql-common prometheus-node-exporter
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+# --- Secrets ---------------------------------------------------------------
+ADMIN_JSON=$(get_secret "${admin_secret_arn}")
+SUPERUSER_PW=$(echo "$ADMIN_JSON" | jq -r .superuser)
+REPLICATION_PW=$(echo "$ADMIN_JSON" | jq -r .replication)
+REWIND_PW=$(echo "$ADMIN_JSON" | jq -r .rewind)
+PATRONI_API_PW=$(echo "$ADMIN_JSON" | jq -r .patroni_api)
+EXPORTER_PW=$(echo "$ADMIN_JSON" | jq -r .exporter)
+GITLAB_DB_PW=$(get_secret "${gitlab_db_secret_arn}")
+PRAEFECT_DB_PW=$(get_secret "${praefect_db_secret_arn}")
+GOSSIP_KEY=$(get_secret "${consul_gossip_secret_arn}")
+
+# --- Consul agent (Patroni's leader-election store) --------------------------
+curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg
+echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+  > /etc/apt/sources.list.d/hashicorp.list
+
+# --- PostgreSQL from PGDG; no default cluster, Patroni creates its own --------
+sed -i 's/^#\?\s*create_main_cluster\s*=.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
+/usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+apt_install consul "postgresql-$PG_VERSION" prometheus-postgres-exporter
+systemctl disable --now postgresql
+
+cat > /etc/consul.d/consul.hcl <<EOF
+datacenter  = "gitlab"
+data_dir    = "/opt/consul"
+node_name   = "${hostname}"
+bind_addr   = "$PRIVATE_IP"
+client_addr = "127.0.0.1"
+encrypt     = "$GOSSIP_KEY"
+server      = false
+retry_join  = ["provider=aws region=$REGION tag_key=ConsulJoin tag_value=${consul_join_tag}"]
+EOF
+chown consul:consul /etc/consul.d/consul.hcl
+chmod 640 /etc/consul.d/consul.hcl
+systemctl enable --now consul
+
+# --- Patroni -------------------------------------------------------------------
+python3 -m venv /opt/patroni
+/opt/patroni/bin/pip install --quiet "patroni[consul,psycopg3]>=4.0,<5"
+install -d -o postgres -g postgres -m 750 /etc/patroni
+install -d -o postgres -g postgres -m 755 "/var/lib/postgresql/$PG_VERSION"
+
+# Runs once, on the node that initialises the cluster: users, databases, extensions.
+cat > /etc/patroni/post-bootstrap.sh <<EOF
+#!/bin/bash
+set -euo pipefail
+psql -v ON_ERROR_STOP=1 "\$1" <<'SQL'
+CREATE ROLE gitlab LOGIN PASSWORD '$GITLAB_DB_PW';
+CREATE ROLE praefect LOGIN PASSWORD '$PRAEFECT_DB_PW';
+CREATE ROLE postgres_exporter LOGIN PASSWORD '$EXPORTER_PW' IN ROLE pg_monitor;
+CREATE DATABASE gitlabhq_production OWNER gitlab;
+CREATE DATABASE praefect_production OWNER praefect;
+\c gitlabhq_production
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE EXTENSION IF NOT EXISTS plpgsql;
+SQL
+EOF
+chown postgres:postgres /etc/patroni/post-bootstrap.sh
+chmod 700 /etc/patroni/post-bootstrap.sh
+
+cat > /etc/patroni/patroni.yml <<EOF
+scope: gitlab-postgres
+namespace: /service/
+name: ${hostname}
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: $PRIVATE_IP:8008
+  authentication:            # write endpoints only; GET /primary stays open for the NLB
+    username: patroni
+    password: "$PATRONI_API_PW"
+
+consul:
+  host: 127.0.0.1:8500
+  register_service: false
+
+bootstrap:
+  # Cluster-wide, stored in Consul on first start; change later with patronictl edit-config.
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        max_connections: ${max_connections}
+        shared_buffers: 4GB
+        effective_cache_size: 12GB
+        work_mem: 8MB
+        maintenance_work_mem: 512MB
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_size: 1GB
+        wal_log_hints: "on"
+        password_encryption: scram-sha-256
+        tcp_keepalives_idle: 60      # keeps idle pooled connections alive through the NLB
+        tcp_keepalives_interval: 10
+        tcp_keepalives_count: 6
+  initdb:
+    - encoding: UTF8
+    - locale: C.UTF-8
+    - data-checksums
+  post_bootstrap: /etc/patroni/post-bootstrap.sh
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: $PRIVATE_IP:5432
+  data_dir: /var/lib/postgresql/$PG_VERSION/patroni
+  bin_dir: /usr/lib/postgresql/$PG_VERSION/bin
+  pgpass: /var/lib/postgresql/.pgpass_patroni
+  authentication:
+    superuser:
+      username: postgres
+      password: "$SUPERUSER_PW"
+    replication:
+      username: replicator
+      password: "$REPLICATION_PW"
+    rewind:
+      username: rewind_user
+      password: "$REWIND_PW"
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+  pg_hba:
+    - local all all peer
+    - host all all 127.0.0.1/32 scram-sha-256
+    - host replication replicator ${vpc_cidr} scram-sha-256
+    - host all all ${vpc_cidr} scram-sha-256
+EOF
+chown postgres:postgres /etc/patroni/patroni.yml
+chmod 600 /etc/patroni/patroni.yml
+
+cat > /etc/systemd/system/patroni.service <<'EOF'
+[Unit]
+Description=Patroni (PostgreSQL high availability)
+After=network-online.target consul.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+ExecStart=/opt/patroni/bin/patroni /etc/patroni/patroni.yml
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+TimeoutSec=30
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now patroni
+
+# --- postgres_exporter ----------------------------------------------------------
+# The exporter user exists once the cluster is bootstrapped; until then it just retries.
+sed -i '/^DATA_SOURCE_NAME=/d' /etc/default/prometheus-postgres-exporter
+echo "DATA_SOURCE_NAME='postgresql://postgres_exporter:$EXPORTER_PW@127.0.0.1:5432/postgres?sslmode=disable'" \
+  >> /etc/default/prometheus-postgres-exporter
+chmod 600 /etc/default/prometheus-postgres-exporter
+systemctl restart prometheus-postgres-exporter
+
+echo "PostgreSQL/Patroni bootstrap finished"
