@@ -1,6 +1,6 @@
 # Every other role allows this group on its metrics ports.
 
-resource "aws_security_group" "this" {
+resource "aws_security_group" "monitoring_sg" {
   name        = "gitlab-monitoring-${local.name_suffix}"
   description = "GitLab monitoring node (Prometheus, Grafana)"
   vpc_id      = var.base.vpc_id
@@ -15,14 +15,14 @@ locals {
     ssh           = { port = 22, from = var.base.vpn_security_group_id, description = "SSH from VPN clients" }
     grafana       = { port = 3000, from = var.base.vpn_security_group_id, description = "Grafana" }
     prometheus    = { port = 9090, from = var.base.vpn_security_group_id, description = "Prometheus" }
-    node-exporter = { port = 9100, from = aws_security_group.this.id, description = "Own node_exporter" }
+    node-exporter = { port = 9100, from = aws_security_group.monitoring_sg.id, description = "Own node_exporter" }
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "this" {
+resource "aws_vpc_security_group_ingress_rule" "monitoring_sg_ingress" {
   for_each = local.ingress
 
-  security_group_id            = aws_security_group.this.id
+  security_group_id            = aws_security_group.monitoring_sg.id
   referenced_security_group_id = each.value.from
   ip_protocol                  = "tcp"
   from_port                    = each.value.port
@@ -30,8 +30,8 @@ resource "aws_vpc_security_group_ingress_rule" "this" {
   description                  = each.value.description
 }
 
-resource "aws_vpc_security_group_egress_rule" "all" {
-  security_group_id = aws_security_group.this.id
+resource "aws_vpc_security_group_egress_rule" "monitoring_sg_egress_all" {
+  security_group_id = aws_security_group.monitoring_sg.id
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
   description       = "All outbound (scrapes, apt, grafana.com, AWS APIs)"

@@ -29,18 +29,19 @@ data "aws_ssm_parameter" "ubuntu" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 }
 
-resource "aws_key_pair" "this" {
+resource "aws_key_pair" "monitoring_key" {
   key_name   = "gitlab-monitoring-${local.name_suffix}"
   public_key = var.base.ssh_public_key
 }
 
-resource "aws_instance" "this" {
+resource "aws_instance" "monitoring" {
+  # A single node: monitoring is not on the critical path.
   ami                    = data.aws_ssm_parameter.ubuntu.insecure_value
-  instance_type          = var.instance_type
-  subnet_id              = var.base.subnet_ids[0]
-  key_name               = aws_key_pair.this.key_name
-  iam_instance_profile   = aws_iam_instance_profile.this.name
-  vpc_security_group_ids = [aws_security_group.this.id]
+  instance_type          = "r8i.xlarge" # 4 vCPU 32 GiB RAM
+  subnet_id              = var.private_subnet_ids[0]
+  key_name               = aws_key_pair.monitoring_key.key_name
+  iam_instance_profile   = aws_iam_instance_profile.monitoring.name
+  vpc_security_group_ids = [aws_security_group.monitoring_sg.id]
 
   metadata_options {
     http_endpoint               = "enabled"
@@ -50,7 +51,7 @@ resource "aws_instance" "this" {
 
   root_block_device {
     volume_type = "gp3"
-    volume_size = var.volume_size
+    volume_size = 100 # Prometheus data
     encrypted   = true
   }
 
@@ -59,7 +60,7 @@ resource "aws_instance" "this" {
     region                   = var.base.region
     project_name             = var.base.project_name
     environment              = var.base.environment
-    retention                = var.retention
+    retention                = "15d" # how long Prometheus keeps metrics
     scrape_jobs              = local.scrape_jobs
     grafana_admin_secret_arn = aws_secretsmanager_secret.grafana_admin.arn
   }))

@@ -12,17 +12,17 @@ data "aws_iam_policy_document" "assume" {
   }
 }
 
-resource "aws_iam_role" "this" {
+resource "aws_iam_role" "monitoring_role" {
   name               = "gitlab-monitoring-${local.name_suffix}"
   assume_role_policy = data.aws_iam_policy_document.assume.json
 }
 
 resource "aws_iam_role_policy_attachment" "ssm" {
-  role       = aws_iam_role.this.name
+  role       = aws_iam_role.monitoring_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-data "aws_iam_policy_document" "this" {
+data "aws_iam_policy_document" "monitoring_policy_document" {
   statement {
     sid       = "ReadGrafanaPassword"
     actions   = ["secretsmanager:GetSecretValue"]
@@ -36,13 +36,13 @@ data "aws_iam_policy_document" "this" {
   }
 }
 
-resource "aws_iam_role_policy" "this" {
+resource "aws_iam_role_policy" "monitoring_policy" {
   name   = "monitoring"
-  role   = aws_iam_role.this.id
-  policy = data.aws_iam_policy_document.this.json
+  role   = aws_iam_role.monitoring_role.id
+  policy = data.aws_iam_policy_document.monitoring_policy_document.json
 }
 
-resource "aws_iam_instance_profile" "this" {
+resource "aws_iam_instance_profile" "monitoring" {
   name = "gitlab-monitoring-${local.name_suffix}"
-  role = aws_iam_role.this.name
+  role = aws_iam_role.monitoring_role.name
 }

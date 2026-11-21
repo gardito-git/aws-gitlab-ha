@@ -14,19 +14,12 @@ variable "base" {
   description = "Settings shared by every role module (local.base in the root main.tf)"
 }
 
-variable "instance_type" {
-  type    = string
-  default = "r8i.xlarge"
-}
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnets, one node per subnet/AZ (module.vpc.private_subnet_ids)"
 
-variable "volume_size" {
-  type        = number
-  default     = 100
-  description = "Root volume size in GiB (gp3); holds Prometheus data"
-}
-
-variable "retention" {
-  type        = string
-  default     = "15d"
-  description = "How long Prometheus keeps metrics"
+  validation {
+    condition     = length(var.private_subnet_ids) == 3
+    error_message = "Exactly 3 private subnets are needed (the monitoring node goes in the first)."
+  }
 }
