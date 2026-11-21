@@ -1,4 +1,4 @@
-resource "aws_security_group" "this" {
+resource "aws_security_group" "gitaly_sg" {
   name        = "gitlab-gitaly-${local.name_suffix}"
   description = "GitLab Gitaly storage nodes"
   vpc_id      = var.base.vpc_id
@@ -17,10 +17,10 @@ locals {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "this" {
+resource "aws_vpc_security_group_ingress_rule" "gitaly_sg_ingress" {
   for_each = local.ingress
 
-  security_group_id            = aws_security_group.this.id
+  security_group_id            = aws_security_group.gitaly_sg.id
   referenced_security_group_id = each.value.from
   ip_protocol                  = "tcp"
   from_port                    = each.value.port
@@ -28,8 +28,8 @@ resource "aws_vpc_security_group_ingress_rule" "this" {
   description                  = each.value.description
 }
 
-resource "aws_vpc_security_group_egress_rule" "all" {
-  security_group_id = aws_security_group.this.id
+resource "aws_vpc_security_group_egress_rule" "gitaly_sg_egress_all" {
+  security_group_id = aws_security_group.gitaly_sg.id
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
   description       = "All outbound (apt, GitLab internal API, AWS APIs)"
