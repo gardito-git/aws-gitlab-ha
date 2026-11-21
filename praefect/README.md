@@ -6,7 +6,9 @@ send every Git operation to Praefect, which routes it to Gitaly and keeps
 3 replicas of every repository. If a Gitaly node dies, Praefect fails over to
 another replica.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`count`, `instance_type`, `volume_size`).
+
+| | Value |
 |---|---|
 | Nodes | `praefect-1..3`, one per AZ |
 | Instance | `c8i.large`, 30 GiB gp3 |
@@ -53,7 +55,8 @@ The NLB itself accepts 2305 only from `client_security_group_ids` (rails, sideki
 
 | Input | Meaning |
 |---|---|
-| `base`, `node_count`, `instance_type`, `volume_size` | Shared settings and size |
+| `base` | Shared settings (VPC, region, SSH key, VPN group) |
+| `private_subnet_ids` | Exactly 3 private subnets; nodes go one per subnet/AZ |
 | `gitlab_version` | GitLab CE package version (empty = newest) |
 | `gitaly_storages` | From the gitaly module |
 | `postgres_endpoint`, `praefect_db_secret_arn` | From the postgres module |
