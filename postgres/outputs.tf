@@ -1,10 +1,12 @@
+# The PostgreSQL nodes' group (not the NLB's): the consul module lets the
+# Consul agents on these nodes in with it.
 output "security_group_id" {
-  value = aws_security_group.this.id
+  value = aws_security_group.postgres_sg.id
 }
 
 output "endpoint" {
   description = "Host name of the NLB; port 5432 is always the current primary"
-  value       = aws_lb.this.dns_name
+  value       = aws_lb.postgres_nlb.dns_name
 }
 
 output "gitlab_db_secret_arn" {
@@ -22,5 +24,5 @@ output "admin_secret_arn" {
 }
 
 output "private_ips" {
-  value = { for name, i in aws_instance.this : name => i.private_ip }
+  value = { for i, node in aws_instance.postgres : "postgres-${i + 1}" => node.private_ip }
 }
