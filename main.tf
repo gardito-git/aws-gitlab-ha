@@ -51,6 +51,8 @@ module "consul" {
   source = "./consul"
   base   = local.base
 
+  private_subnet_ids = module.vpc.private_subnet_ids
+
   monitoring_security_group_id = local.monitoring_sg
   agent_security_group_ids     = { postgres = module.postgres.security_group_id }
 }
@@ -58,6 +60,8 @@ module "consul" {
 module "postgres" {
   source = "./postgres"
   base   = local.base
+
+  private_subnet_ids = module.vpc.private_subnet_ids
 
   monitoring_security_group_id = local.monitoring_sg
   consul_security_group_id     = module.consul.security_group_id
@@ -75,6 +79,8 @@ module "redis" {
   source = "./redis"
   base   = local.base
 
+  private_subnet_ids = module.vpc.private_subnet_ids
+
   monitoring_security_group_id = local.monitoring_sg
   client_security_group_ids = {
     rails   = module.rails.security_group_id
@@ -87,6 +93,8 @@ module "redis" {
 module "praefect" {
   source = "./praefect"
   base   = local.base
+
+  private_subnet_ids = module.vpc.private_subnet_ids
 
   gitlab_version               = var.gitlab_version
   monitoring_security_group_id = local.monitoring_sg
@@ -104,6 +112,8 @@ module "gitaly" {
   source = "./gitaly"
   base   = local.base
 
+  private_subnet_ids = module.vpc.private_subnet_ids
+
   gitlab_version                     = var.gitlab_version
   monitoring_security_group_id       = local.monitoring_sg
   praefect_security_group_id         = module.praefect.security_group_id
@@ -118,6 +128,8 @@ module "gitaly" {
 module "rails" {
   source = "./rails"
   base   = local.base
+
+  private_subnet_ids = module.vpc.private_subnet_ids
 
   gitlab_version               = var.gitlab_version
   gitlab_domain                = var.gitlab_domain
@@ -141,6 +153,8 @@ module "rails" {
 module "sidekiq" {
   source = "./sidekiq"
   base   = local.base
+
+  private_subnet_ids = module.vpc.private_subnet_ids
 
   gitlab_version               = var.gitlab_version
   monitoring_security_group_id = local.monitoring_sg
@@ -166,6 +180,8 @@ module "runner" {
   source = "./runner"
   base   = local.base
 
+  private_subnet_ids = module.vpc.private_subnet_ids
+
   monitoring_security_group_id = local.monitoring_sg
   gitlab_url                   = module.rails.gitlab_url
   gitlab_ca_cert               = module.rails.gitlab_ca_cert
@@ -177,4 +193,6 @@ module "runner" {
 module "monitoring" {
   source = "./monitoring"
   base   = local.base
+
+  private_subnet_ids = module.vpc.private_subnet_ids
 }
