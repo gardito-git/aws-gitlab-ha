@@ -1,0 +1,107 @@
+#!/bin/bash
+# Praefect node bootstrap (rendered by Terraform, runs once at first boot).
+# Log: /var/log/cloud-init-output.log
+set -euo pipefail
+
+REGION="${region}"
+export PATH="$PATH:/snap/bin"
+
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$@"; }
+get_secret() {
+  for _ in $(seq 1 60); do
+    aws secretsmanager get-secret-value --region "$REGION" --secret-id "$1" --query SecretString --output text 2>/dev/null && return 0
+    sleep 10
+  done
+  echo "could not read secret $1" >&2
+  return 1
+}
+wait_for_port() {
+  until timeout 3 bash -c "</dev/tcp/$1/$2" 2>/dev/null; do
+    echo "waiting for $1:$2"
+    sleep 10
+  done
+}
+
+hostnamectl set-hostname "${hostname}"
+echo "127.0.1.1 ${hostname}" >> /etc/hosts
+timedatectl set-timezone Etc/UTC
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt_install curl jq
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+EXTERNAL_TOKEN=$(get_secret "${external_token_secret_arn}")
+INTERNAL_TOKEN=$(get_secret "${internal_token_secret_arn}")
+PRAEFECT_DB_PW=$(get_secret "${praefect_db_secret_arn}")
+
+install -d -m 755 /etc/gitlab
+touch /etc/gitlab/skip-auto-reconfigure
+
+cat > /etc/gitlab/gitlab.rb <<EOF
+# Praefect node. Written by the first-boot script.
+gitaly['enable'] = false
+postgresql['enable'] = false
+redis['enable'] = false
+nginx['enable'] = false
+puma['enable'] = false
+sidekiq['enable'] = false
+gitlab_workhorse['enable'] = false
+prometheus['enable'] = false
+alertmanager['enable'] = false
+gitlab_exporter['enable'] = false
+postgres_exporter['enable'] = false
+redis_exporter['enable'] = false
+gitlab_kas['enable'] = false
+letsencrypt['enable'] = false
+gitlab_rails['auto_migrate'] = false
+
+node_exporter['listen_address'] = '0.0.0.0:9100'
+
+praefect['enable'] = true
+# Schema migrations run on praefect-1 only.
+praefect['auto_migrate'] = ${run_migrations}
+
+praefect['configuration'] = {
+  listen_addr: '0.0.0.0:2305',
+  prometheus_listen_addr: '0.0.0.0:9652',
+  auth: {
+    token: '$EXTERNAL_TOKEN',
+  },
+  database: {
+    host: '${postgres_endpoint}',
+    port: 5432,
+    user: 'praefect',
+    password: '$PRAEFECT_DB_PW',
+    dbname: 'praefect_production',
+    sslmode: 'disable', # private VPC traffic; PostgreSQL has no TLS configured
+  },
+  virtual_storage: [
+    {
+      name: 'default',
+      default_replication_factor: ${length(gitaly_storages)},
+      node: [
+%{ for name, ip in gitaly_storages ~}
+        { storage: '${name}', address: 'tcp://${ip}:8075', token: '$INTERNAL_TOKEN' },
+%{ endfor ~}
+      ],
+    },
+  ],
+}
+EOF
+chmod 600 /etc/gitlab/gitlab.rb
+
+curl -fsSL https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash
+apt_install ${gitlab_package}
+
+# The praefect database is created when the PostgreSQL cluster bootstraps;
+# retry until it is there.
+wait_for_port "${postgres_endpoint}" 5432
+for attempt in $(seq 1 20); do
+  gitlab-ctl reconfigure && break
+  [ "$attempt" -eq 20 ] && exit 1
+  echo "reconfigure failed (attempt $attempt), retrying in 30 s"
+  sleep 30
+done
+
+echo "Praefect bootstrap finished"
