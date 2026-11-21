@@ -4,7 +4,9 @@ Six GitLab Runner machines with the Docker executor: every CI job runs in a
 fresh container. All six register against one instance-wide runner, so any
 project can use them.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`count`, `instance_type`, `volume_size`, `concurrent`, `default_image`).
+
+| | Value |
 |---|---|
 | Nodes | `runner-1..6`, two per AZ |
 | Instance | `c8i.xlarge` (4 vCPU), 100 GiB gp3 for images and caches |
@@ -48,8 +50,8 @@ project can use them.
 
 | Input | Meaning |
 |---|---|
-| `base`, `node_count`, `instance_type`, `volume_size` | Shared settings and size |
-| `concurrent`, `default_image` | Runner settings |
+| `base` | Shared settings (VPC, region, SSH key, VPN group) |
+| `private_subnet_ids` | Exactly 3 private subnets; nodes go two per subnet/AZ |
 | `gitlab_url`, `gitlab_ca_cert`, `runner_token_secret_arn` | From rails |
 | `monitoring_security_group_id` | Allowed to scrape metrics |
 
