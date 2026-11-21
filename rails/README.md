@@ -4,7 +4,9 @@ Three GitLab Rails nodes (NGINX, Workhorse and Puma) behind the frontend NLB,
 serving the web UI, the API, and Git over HTTPS and SSH. This module also owns
 GitLab's front door: the NLB, the private DNS name and the TLS certificate.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`count`, `instance_type`, `volume_size`, and the backup schedule `backup_cron`).
+
+| | Value |
 |---|---|
 | Nodes | `rails-1..3`, one per AZ |
 | Instance | `c8i.xlarge` (4 vCPU, 8 GiB), 100 GiB gp3 |
@@ -81,13 +83,13 @@ The NLB accepts 443 and 22 from the whole VPC (VPN users, runners, Gitaly hooks)
 
 | Input | Meaning |
 |---|---|
-| `base`, `node_count`, `instance_type`, `volume_size` | Shared settings and size |
+| `base` | Shared settings (VPC, region, SSH key, VPN group) |
+| `private_subnet_ids` | Exactly 3 private subnets; nodes go one per subnet/AZ |
 | `gitlab_version`, `gitlab_domain`, `route53_public_zone_id` | GitLab settings |
 | `postgres_endpoint`, `gitlab_db_secret_arn` | From postgres |
 | `redis_sentinel_hosts`, `redis_master_name`, `redis_password_secret_arn` | From redis |
 | `praefect_endpoint`, `praefect_external_token_secret_arn` | From praefect |
 | `object_buckets`, `backup_bucket`, `bucket_arns` | From s3 |
-| `backup_cron` | Default `0 0 * * *` (UTC) |
 | `prometheus_address`, `monitoring_security_group_id` | From monitoring |
 
 | Output | Used by |
