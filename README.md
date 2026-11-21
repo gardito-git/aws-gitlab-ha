@@ -3,8 +3,12 @@
 GitLab CE in a highly available setup on EC2, across 3 availability zones,
 reachable only through AWS Client VPN. One `terraform apply` builds
 everything: each node installs and configures itself at first boot
-(`user_data`), fetching its passwords from Secrets Manager. There is nothing
-to run from your laptop.
+(`user_data`), fetching its passwords from Secrets Manager.
+
+![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A51.5-7B42BC?logo=terraform&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-provider%206.x-FF9900?logo=amazonwebservices&logoColor=white)
+![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04%20LTS-E95420?logo=ubuntu&logoColor=white)
+![Gitlab](https://img.shields.io/badge/Gitlab-18.11.14%20CE-E95420?logo=gitlab&logoColor=white)
 
 ```
                        VPN user / runners (inside the VPC)
@@ -49,9 +53,9 @@ One folder per component. Each holds everything that component needs, plus a REA
 | [runner/](runner/README.md) | compute, security-groups, iam, scripts | 6 GitLab Runners (Docker executor) |
 | [monitoring/](monitoring/README.md) | compute, security-groups, iam, secret-manager, scripts | Prometheus + Grafana |
 
-[main.tf](main.tf) wires the modules together. Sizes are each module's
-variable defaults (`node_count`, `instance_type`, `volume_size`); override
-them in `main.tf`, e.g. `module "runner" { ... node_count = 2 }`.
+[main.tf](main.tf) wires the modules together. Each module sets its own size
+directly in its `compute.tf` (`count`, `instance_type`, `volume_size`), and
+takes the 3 private subnets as `private_subnet_ids`, one node per AZ.
 
 ## How the nodes coordinate at first boot
 
