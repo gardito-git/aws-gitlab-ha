@@ -7,28 +7,21 @@ variable "base" {
     region                = string
     vpc_id                = string
     vpc_cidr              = string
-    subnet_ids            = list(string) # one private subnet per AZ, in AZ order
+    subnet_ids            = list(string)
     ssh_public_key        = string
     vpn_security_group_id = string
   })
   description = "Settings shared by every role module (local.base in the root main.tf)"
 }
 
-variable "node_count" {
-  type        = number
-  default     = 3
-  description = "Consul servers. Keep it odd (3 or 5) so they can always elect a leader."
-}
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnets, one node per subnet/AZ (module.vpc.private_subnet_ids)"
 
-variable "instance_type" {
-  type    = string
-  default = "c8i.large"
-}
-
-variable "volume_size" {
-  type        = number
-  default     = 30
-  description = "Root volume size in GiB (gp3)"
+  validation {
+    condition     = length(var.private_subnet_ids) == 3
+    error_message = "Exactly 3 private subnets are needed: one Consul server per AZ, and Consul needs 3 servers for a quorum."
+  }
 }
 
 variable "monitoring_security_group_id" {

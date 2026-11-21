@@ -1,5 +1,5 @@
 output "security_group_id" {
-  value = aws_security_group.this.id
+  value = aws_security_group.consul_sg.id
 }
 
 output "join_tag" {
@@ -12,5 +12,5 @@ output "gossip_secret_arn" {
 }
 
 output "private_ips" {
-  value = { for name, i in aws_instance.this : name => i.private_ip }
+  value = { for i, node in aws_instance.consul : "consul-${i + 1}" => node.private_ip }
 }
