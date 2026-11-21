@@ -14,31 +14,14 @@ variable "base" {
   description = "Settings shared by every role module (local.base in the root main.tf)"
 }
 
-variable "node_count" {
-  type    = number
-  default = 3
-}
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnets, one node per subnet/AZ (module.vpc.private_subnet_ids)"
 
-variable "instance_type" {
-  type    = string
-  default = "r8i.large"
-}
-
-variable "volume_size" {
-  type        = number
-  default     = 100
-  description = "Root volume size in GiB (gp3); holds the database"
-}
-
-variable "postgres_version" {
-  type    = number
-  default = 17
-}
-
-variable "max_connections" {
-  type        = number
-  default     = 500
-  description = "No PgBouncer: every Rails/Sidekiq/Praefect connection is a PostgreSQL connection"
+  validation {
+    condition     = length(var.private_subnet_ids) == 3
+    error_message = "Exactly 3 private subnets are needed: one PostgreSQL node per AZ, so the cluster survives losing an AZ."
+  }
 }
 
 variable "monitoring_security_group_id" {

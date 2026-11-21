@@ -2,7 +2,7 @@
 # to PostgreSQL but decides health on Patroni's REST API: only the leader
 # answers 200 on GET :8008/primary. This replaces PgBouncer + HAProxy.
 
-resource "aws_security_group" "nlb" {
+resource "aws_security_group" "postgres_nlb" {
   name        = "gitlab-postgres-nlb-${local.name_suffix}"
   description = "GitLab PostgreSQL NLB"
   vpc_id      = var.base.vpc_id
@@ -12,10 +12,10 @@ resource "aws_security_group" "nlb" {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "nlb" {
+resource "aws_vpc_security_group_ingress_rule" "postgres_nlb_ingress" {
   for_each = var.client_security_group_ids
 
-  security_group_id            = aws_security_group.nlb.id
+  security_group_id            = aws_security_group.postgres_nlb.id
   referenced_security_group_id = each.value
   ip_protocol                  = "tcp"
   from_port                    = 5432
@@ -23,19 +23,19 @@ resource "aws_vpc_security_group_ingress_rule" "nlb" {
   description                  = "PostgreSQL from ${each.key}"
 }
 
-resource "aws_vpc_security_group_egress_rule" "nlb" {
-  security_group_id = aws_security_group.nlb.id
+resource "aws_vpc_security_group_egress_rule" "postgres_nlb_egress" {
+  security_group_id = aws_security_group.postgres_nlb.id
   ip_protocol       = "-1"
   cidr_ipv4         = var.base.vpc_cidr
   description       = "To PostgreSQL nodes and health checks"
 }
 
-resource "aws_lb" "this" {
+resource "aws_lb" "postgres_nlb" {
   name               = substr("gl-pg-${local.name_suffix}", 0, 32)
   internal           = true
   load_balancer_type = "network"
   subnets            = var.base.subnet_ids
-  security_groups    = [aws_security_group.nlb.id]
+  security_groups    = [aws_security_group.postgres_nlb.id]
 
   # Required: the single healthy primary lives in one AZ, and every NLB node
   # must be able to reach it.
@@ -46,7 +46,7 @@ resource "aws_lb" "this" {
   }
 }
 
-resource "aws_lb_target_group" "this" {
+resource "aws_lb_target_group" "postgres_tg" {
   name               = substr("gl-pg-${local.name_suffix}", 0, 32)
   port               = 5432
   protocol           = "TCP"
@@ -71,16 +71,16 @@ resource "aws_lb_target_group" "this" {
   }
 }
 
-resource "aws_lb_target_group_attachment" "this" {
-  for_each = aws_instance.this
+resource "aws_lb_target_group_attachment" "postgres_tg_attachment" {
+  count = length(aws_instance.postgres)
 
-  target_group_arn = aws_lb_target_group.this.arn
-  target_id        = each.value.id
+  target_group_arn = aws_lb_target_group.postgres_tg.arn
+  target_id        = aws_instance.postgres[count.index].id
   port             = 5432
 }
 
-resource "aws_lb_listener" "this" {
-  load_balancer_arn = aws_lb.this.arn
+resource "aws_lb_listener" "postgres_nlb_listener" {
+  load_balancer_arn = aws_lb.postgres_nlb.arn
   port              = 5432
   protocol          = "TCP"
   # Rails keeps idle connections in its pool; the 350 s default would drop them.
@@ -88,6 +88,6 @@ resource "aws_lb_listener" "this" {
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.this.arn
+    target_group_arn = aws_lb_target_group.postgres_tg.arn
   }
 }

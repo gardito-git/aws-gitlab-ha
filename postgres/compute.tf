@@ -7,32 +7,26 @@
 
 locals {
   name_suffix = "${var.base.project_name}-${var.base.environment}"
-
-  nodes = {
-    for i in range(var.node_count) : "postgres-${i + 1}" => {
-      subnet_id = var.base.subnet_ids[i % length(var.base.subnet_ids)]
-    }
-  }
 }
 
 data "aws_ssm_parameter" "ubuntu" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 }
 
-resource "aws_key_pair" "this" {
+resource "aws_key_pair" "postgres_key" {
   key_name   = "gitlab-postgres-${local.name_suffix}"
   public_key = var.base.ssh_public_key
 }
 
-resource "aws_instance" "this" {
-  for_each = local.nodes
+resource "aws_instance" "postgres" {
+  count = 3 # postgres-1..3, one per private subnet/AZ
 
   ami                    = data.aws_ssm_parameter.ubuntu.insecure_value
-  instance_type          = var.instance_type
-  subnet_id              = each.value.subnet_id
-  key_name               = aws_key_pair.this.key_name
-  iam_instance_profile   = aws_iam_instance_profile.this.name
-  vpc_security_group_ids = [aws_security_group.this.id]
+  instance_type          = "r8i.large" # 2 vCPU 16 GiB RAM
+  subnet_id              = var.private_subnet_ids[count.index]
+  key_name               = aws_key_pair.postgres_key.key_name
+  iam_instance_profile   = aws_iam_instance_profile.postgres.name
+  vpc_security_group_ids = [aws_security_group.postgres_sg.id]
 
   metadata_options {
     http_endpoint               = "enabled"
@@ -42,16 +36,16 @@ resource "aws_instance" "this" {
 
   root_block_device {
     volume_type = "gp3"
-    volume_size = var.volume_size
+    volume_size = 100
     encrypted   = true
   }
 
   user_data_base64 = base64gzip(templatefile("${path.module}/scripts/user-data.sh.tftpl", {
-    hostname                 = "gitlab-${each.key}"
+    hostname                 = "gitlab-postgres-${count.index + 1}"
     region                   = var.base.region
     vpc_cidr                 = var.base.vpc_cidr
-    postgres_version         = var.postgres_version
-    max_connections          = var.max_connections
+    postgres_version         = 17
+    max_connections          = 500 # No PgBouncer: every Rails/Sidekiq/Praefect connection is a PostgreSQL connection
     consul_join_tag          = var.consul_join_tag
     consul_gossip_secret_arn = var.consul_gossip_secret_arn
     admin_secret_arn         = aws_secretsmanager_secret.admin.arn
@@ -60,7 +54,7 @@ resource "aws_instance" "this" {
   }))
 
   tags = {
-    Name = "gitlab-${each.key}-${local.name_suffix}"
+    Name = "gitlab-postgres-${count.index + 1}-${local.name_suffix}"
     Role = "postgres"
   }
 
