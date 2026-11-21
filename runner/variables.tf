@@ -14,32 +14,14 @@ variable "base" {
   description = "Settings shared by every role module (local.base in the root main.tf)"
 }
 
-variable "node_count" {
-  type    = number
-  default = 6
-}
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnets, one node per subnet/AZ (module.vpc.private_subnet_ids)"
 
-variable "instance_type" {
-  type    = string
-  default = "c8i.xlarge"
-}
-
-variable "volume_size" {
-  type        = number
-  default     = 100
-  description = "Root volume size in GiB (gp3); holds Docker images and build caches"
-}
-
-variable "concurrent" {
-  type        = number
-  default     = 4
-  description = "CI jobs at once per runner machine (c8i.xlarge = 4 vCPU)"
-}
-
-variable "default_image" {
-  type        = string
-  default     = "alpine:latest"
-  description = "Image for jobs that don't set one"
+  validation {
+    condition     = length(var.private_subnet_ids) == 3
+    error_message = "Exactly 3 private subnets are needed: the 6 runners are spread 2 per AZ."
+  }
 }
 
 variable "gitlab_url" {

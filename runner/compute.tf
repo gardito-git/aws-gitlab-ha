@@ -4,32 +4,26 @@
 
 locals {
   name_suffix = "${var.base.project_name}-${var.base.environment}"
-
-  nodes = {
-    for i in range(var.node_count) : "runner-${i + 1}" => {
-      subnet_id = var.base.subnet_ids[i % length(var.base.subnet_ids)]
-    }
-  }
 }
 
 data "aws_ssm_parameter" "ubuntu" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 }
 
-resource "aws_key_pair" "this" {
+resource "aws_key_pair" "runner_key" {
   key_name   = "gitlab-runner-${local.name_suffix}"
   public_key = var.base.ssh_public_key
 }
 
-resource "aws_instance" "this" {
-  for_each = local.nodes
+resource "aws_instance" "runner" {
+  count = 6 # runner-1..6, two per private subnet/AZ (1->a, 2->b, 3->c, 4->a ...)
 
   ami                    = data.aws_ssm_parameter.ubuntu.insecure_value
-  instance_type          = var.instance_type
-  subnet_id              = each.value.subnet_id
-  key_name               = aws_key_pair.this.key_name
-  iam_instance_profile   = aws_iam_instance_profile.this.name
-  vpc_security_group_ids = [aws_security_group.this.id]
+  instance_type          = "c8i.xlarge" # 4 vCPU 8 GiB RAM
+  subnet_id              = var.private_subnet_ids[count.index % 3]
+  key_name               = aws_key_pair.runner_key.key_name
+  iam_instance_profile   = aws_iam_instance_profile.runner.name
+  vpc_security_group_ids = [aws_security_group.runner_sg.id]
 
   # Hop limit 1: CI job containers cannot reach the metadata service, so they
   # cannot borrow this machine's AWS role.
@@ -41,23 +35,23 @@ resource "aws_instance" "this" {
 
   root_block_device {
     volume_type = "gp3"
-    volume_size = var.volume_size
+    volume_size = 100 # Docker images and build caches
     encrypted   = true
   }
 
   user_data_base64 = base64gzip(templatefile("${path.module}/scripts/user-data.sh.tftpl", {
-    hostname                = "gitlab-${each.key}"
+    hostname                = "gitlab-runner-${count.index + 1}"
     region                  = var.base.region
     gitlab_url              = var.gitlab_url
     gitlab_host             = replace(var.gitlab_url, "https://", "")
     gitlab_ca_cert          = var.gitlab_ca_cert
     runner_token_secret_arn = var.runner_token_secret_arn
-    concurrent              = var.concurrent
-    default_image           = var.default_image
+    concurrent              = 4               # CI jobs at once per machine (4 vCPU)
+    default_image           = "alpine:latest" # for jobs that don't set an image
   }))
 
   tags = {
-    Name = "gitlab-${each.key}-${local.name_suffix}"
+    Name = "gitlab-runner-${count.index + 1}-${local.name_suffix}"
     Role = "runner"
   }
 
