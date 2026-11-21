@@ -65,5 +65,6 @@ variable "gitlab_buckets_force_destroy" {
 variable "gitlab_version" {
   type        = string
   default     = ""
+  # default     = "18.11.14-ce" # pin it to avoid nodes drifting apart
   description = "GitLab CE package version for every GitLab node, e.g. \"18.6.0-ce.0\". Empty = newest at first boot; pin it so all nodes match."
 }
