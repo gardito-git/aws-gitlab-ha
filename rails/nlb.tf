@@ -3,7 +3,7 @@
 #    22 TCP                   -> Rails :22   git clone git@gitlab...
 # An ALB can't carry SSH, which is why this is an NLB.
 
-resource "aws_security_group" "nlb" {
+resource "aws_security_group" "rails_nlb" {
   name        = "gitlab-rails-nlb-${local.name_suffix}"
   description = "GitLab frontend NLB (HTTPS 443, Git SSH 22)"
   vpc_id      = var.base.vpc_id
@@ -15,10 +15,10 @@ resource "aws_security_group" "nlb" {
 
 # Everyone inside the VPC: VPN users (NATed to the VPN's network interfaces),
 # runners, Gitaly calling the internal API.
-resource "aws_vpc_security_group_ingress_rule" "nlb" {
+resource "aws_vpc_security_group_ingress_rule" "rails_nlb_ingress" {
   for_each = { https = 443, ssh = 22 }
 
-  security_group_id = aws_security_group.nlb.id
+  security_group_id = aws_security_group.rails_nlb.id
   cidr_ipv4         = var.base.vpc_cidr
   ip_protocol       = "tcp"
   from_port         = each.value
@@ -26,19 +26,19 @@ resource "aws_vpc_security_group_ingress_rule" "nlb" {
   description       = each.key == "https" ? "GitLab HTTPS from the VPC" : "Git SSH from the VPC"
 }
 
-resource "aws_vpc_security_group_egress_rule" "nlb" {
-  security_group_id = aws_security_group.nlb.id
+resource "aws_vpc_security_group_egress_rule" "rails_nlb_egress" {
+  security_group_id = aws_security_group.rails_nlb.id
   ip_protocol       = "-1"
   cidr_ipv4         = var.base.vpc_cidr
   description       = "To Rails nodes and health checks"
 }
 
-resource "aws_lb" "this" {
+resource "aws_lb" "rails_nlb" {
   name               = substr("gl-rails-${local.name_suffix}", 0, 32)
   internal           = true
   load_balancer_type = "network"
   subnets            = var.base.subnet_ids
-  security_groups    = [aws_security_group.nlb.id]
+  security_groups    = [aws_security_group.rails_nlb.id]
 
   enable_cross_zone_load_balancing = true
 
@@ -47,7 +47,7 @@ resource "aws_lb" "this" {
   }
 }
 
-resource "aws_lb_target_group" "http" {
+resource "aws_lb_target_group" "rails_http_tg" {
   name               = substr("gl-http-${local.name_suffix}", 0, 32)
   port               = 80
   protocol           = "TCP"
@@ -66,7 +66,7 @@ resource "aws_lb_target_group" "http" {
   }
 }
 
-resource "aws_lb_target_group" "ssh" {
+resource "aws_lb_target_group" "rails_ssh_tg" {
   name               = substr("gl-ssh-${local.name_suffix}", 0, 32)
   port               = 22
   protocol           = "TCP"
@@ -81,24 +81,24 @@ resource "aws_lb_target_group" "ssh" {
   }
 }
 
-resource "aws_lb_target_group_attachment" "http" {
-  for_each = aws_instance.this
+resource "aws_lb_target_group_attachment" "rails_http_tg_attachment" {
+  count = length(aws_instance.rails)
 
-  target_group_arn = aws_lb_target_group.http.arn
-  target_id        = each.value.id
+  target_group_arn = aws_lb_target_group.rails_http_tg.arn
+  target_id        = aws_instance.rails[count.index].id
   port             = 80
 }
 
-resource "aws_lb_target_group_attachment" "ssh" {
-  for_each = aws_instance.this
+resource "aws_lb_target_group_attachment" "rails_ssh_tg_attachment" {
+  count = length(aws_instance.rails)
 
-  target_group_arn = aws_lb_target_group.ssh.arn
-  target_id        = each.value.id
+  target_group_arn = aws_lb_target_group.rails_ssh_tg.arn
+  target_id        = aws_instance.rails[count.index].id
   port             = 22
 }
 
-resource "aws_lb_listener" "https" {
-  load_balancer_arn = aws_lb.this.arn
+resource "aws_lb_listener" "rails_https_listener" {
+  load_balancer_arn = aws_lb.rails_nlb.arn
   port              = 443
   protocol          = "TLS"
   certificate_arn   = local.certificate_arn
@@ -106,17 +106,17 @@ resource "aws_lb_listener" "https" {
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.http.arn
+    target_group_arn = aws_lb_target_group.rails_http_tg.arn
   }
 }
 
-resource "aws_lb_listener" "ssh" {
-  load_balancer_arn = aws_lb.this.arn
+resource "aws_lb_listener" "rails_ssh_listener" {
+  load_balancer_arn = aws_lb.rails_nlb.arn
   port              = 22
   protocol          = "TCP"
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.ssh.arn
+    target_group_arn = aws_lb_target_group.rails_ssh_tg.arn
   }
 }

@@ -1,4 +1,4 @@
-resource "aws_security_group" "this" {
+resource "aws_security_group" "rails_sg" {
   name        = "gitlab-rails-${local.name_suffix}"
   description = "GitLab Rails nodes"
   vpc_id      = var.base.vpc_id
@@ -11,8 +11,8 @@ resource "aws_security_group" "this" {
 locals {
   ingress = {
     ssh                     = { port = 22, from = var.base.vpn_security_group_id, description = "SSH from VPN clients" }
-    git-ssh-nlb             = { port = 22, from = aws_security_group.nlb.id, description = "Git over SSH via NLB" }
-    http-nlb                = { port = 80, from = aws_security_group.nlb.id, description = "GitLab HTTP (TLS ends on the NLB)" }
+    git-ssh-nlb             = { port = 22, from = aws_security_group.rails_nlb.id, description = "Git over SSH via NLB" }
+    http-nlb                = { port = 80, from = aws_security_group.rails_nlb.id, description = "GitLab HTTP (TLS ends on the NLB)" }
     http-monitoring         = { port = 80, from = var.monitoring_security_group_id, description = "GitLab /-/metrics" }
     node-exporter           = { port = 9100, from = var.monitoring_security_group_id, description = "node_exporter" }
     workhorse-metrics       = { port = 9229, from = var.monitoring_security_group_id, description = "Workhorse metrics" }
@@ -21,10 +21,10 @@ locals {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "this" {
+resource "aws_vpc_security_group_ingress_rule" "rails_sg_ingress" {
   for_each = local.ingress
 
-  security_group_id            = aws_security_group.this.id
+  security_group_id            = aws_security_group.rails_sg.id
   referenced_security_group_id = each.value.from
   ip_protocol                  = "tcp"
   from_port                    = each.value.port
@@ -32,8 +32,8 @@ resource "aws_vpc_security_group_ingress_rule" "this" {
   description                  = each.value.description
 }
 
-resource "aws_vpc_security_group_egress_rule" "all" {
-  security_group_id = aws_security_group.this.id
+resource "aws_vpc_security_group_egress_rule" "rails_sg_egress_all" {
+  security_group_id = aws_security_group.rails_sg.id
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
   description       = "All outbound (apt, PostgreSQL, Redis, Praefect, S3, AWS APIs)"

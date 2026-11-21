@@ -7,15 +7,8 @@
 # backup. rails-2/3 and the Sidekiq nodes wait for that secret, then join.
 
 locals {
-  name_suffix = "${var.base.project_name}-${var.base.environment}"
-  gitlab_url  = "https://${var.gitlab_domain}"
-
-  nodes = {
-    for i in range(var.node_count) : "rails-${i + 1}" => {
-      subnet_id = var.base.subnet_ids[i % length(var.base.subnet_ids)]
-    }
-  }
-
+  name_suffix    = "${var.base.project_name}-${var.base.environment}"
+  gitlab_url     = "https://${var.gitlab_domain}"
   gitlab_package = var.gitlab_version == "" ? "gitlab-ce" : "gitlab-ce=${var.gitlab_version}"
 }
 
@@ -23,20 +16,20 @@ data "aws_ssm_parameter" "ubuntu" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 }
 
-resource "aws_key_pair" "this" {
+resource "aws_key_pair" "rails_key" {
   key_name   = "gitlab-rails-${local.name_suffix}"
   public_key = var.base.ssh_public_key
 }
 
-resource "aws_instance" "this" {
-  for_each = local.nodes
+resource "aws_instance" "rails" {
+  count = 3 # rails-1..3, one per private subnet/AZ
 
   ami                    = data.aws_ssm_parameter.ubuntu.insecure_value
-  instance_type          = var.instance_type
-  subnet_id              = each.value.subnet_id
-  key_name               = aws_key_pair.this.key_name
-  iam_instance_profile   = aws_iam_instance_profile.this.name
-  vpc_security_group_ids = [aws_security_group.this.id]
+  instance_type          = "c8i.xlarge" # 4 vCPU 8 GiB RAM
+  subnet_id              = var.private_subnet_ids[count.index]
+  key_name               = aws_key_pair.rails_key.key_name
+  iam_instance_profile   = aws_iam_instance_profile.rails.name
+  vpc_security_group_ids = [aws_security_group.rails_sg.id]
 
   # IMDSv2, hop limit 1: GitLab gets the instance role for S3.
   metadata_options {
@@ -47,13 +40,13 @@ resource "aws_instance" "this" {
 
   root_block_device {
     volume_type = "gp3"
-    volume_size = var.volume_size
+    volume_size = 100 # also holds the local backup archive before upload
     encrypted   = true
   }
 
   user_data_base64 = base64gzip(templatefile("${path.module}/scripts/user-data.sh.tftpl", {
-    hostname       = "gitlab-${each.key}"
-    is_primary     = each.key == "rails-1"
+    hostname       = "gitlab-rails-${count.index + 1}"
+    is_primary     = count.index == 0 # rails-1
     region         = var.base.region
     vpc_cidr       = var.base.vpc_cidr
     gitlab_package = local.gitlab_package
@@ -69,7 +62,7 @@ resource "aws_instance" "this" {
     praefect_external_token_secret_arn = var.praefect_external_token_secret_arn
     object_buckets                     = var.object_buckets
     backup_bucket                      = var.backup_bucket
-    backup_cron                        = var.backup_cron
+    backup_cron                        = "0 0 * * *" # daily at 00:00 UTC (nodes run in UTC)
     prometheus_address                 = var.prometheus_address
 
     root_password_secret_arn  = aws_secretsmanager_secret.root_password.arn
@@ -80,7 +73,7 @@ resource "aws_instance" "this" {
   }))
 
   tags = {
-    Name = "gitlab-${each.key}-${local.name_suffix}"
+    Name = "gitlab-rails-${count.index + 1}-${local.name_suffix}"
     Role = "rails"
   }
 

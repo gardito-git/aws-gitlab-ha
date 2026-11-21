@@ -14,20 +14,14 @@ variable "base" {
   description = "Settings shared by every role module (local.base in the root main.tf)"
 }
 
-variable "node_count" {
-  type    = number
-  default = 3
-}
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnets, one node per subnet/AZ (module.vpc.private_subnet_ids)"
 
-variable "instance_type" {
-  type    = string
-  default = "c8i.xlarge"
-}
-
-variable "volume_size" {
-  type        = number
-  default     = 100
-  description = "Root volume size in GiB (gp3); also holds the local backup archive before upload"
+  validation {
+    condition     = length(var.private_subnet_ids) == 3
+    error_message = "Exactly 3 private subnets are needed: one Rails node per AZ."
+  }
 }
 
 variable "gitlab_version" {
@@ -89,12 +83,6 @@ variable "backup_bucket" {
 variable "bucket_arns" {
   type        = list(string)
   description = "Every GitLab bucket (object storage + backups)"
-}
-
-variable "backup_cron" {
-  type        = string
-  default     = "0 0 * * *"
-  description = "When gitlab-backup runs on rails-1 (nodes run in UTC): daily at 00:00 UTC"
 }
 
 variable "prometheus_address" {

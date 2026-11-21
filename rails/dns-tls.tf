@@ -2,7 +2,7 @@
 # VPC. It resolves only inside the VPC, including for VPN clients (the Client
 # VPN hands out the VPC resolver). Named after the full host, it shadows nothing.
 
-resource "aws_route53_zone" "this" {
+resource "aws_route53_zone" "gitlab_zone" {
   name    = var.gitlab_domain
   comment = "GitLab (${local.name_suffix})"
 
@@ -11,14 +11,14 @@ resource "aws_route53_zone" "this" {
   }
 }
 
-resource "aws_route53_record" "gitlab" {
-  zone_id = aws_route53_zone.this.zone_id
+resource "aws_route53_record" "gitlab_record" {
+  zone_id = aws_route53_zone.gitlab_zone.zone_id
   name    = var.gitlab_domain
   type    = "A"
 
   alias {
-    name                   = aws_lb.this.dns_name
-    zone_id                = aws_lb.this.zone_id
+    name                   = aws_lb.rails_nlb.dns_name
+    zone_id                = aws_lb.rails_nlb.zone_id
     evaluate_target_health = true
   }
 }
