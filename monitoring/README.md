@@ -3,7 +3,9 @@
 One node running Prometheus and Grafana. Prometheus scrapes every node of
 the cluster; Grafana shows it. Both are reachable over the VPN only.
 
-| | Default |
+Sizes are set directly in `compute.tf` (`instance_type`, `volume_size`, Prometheus `retention`).
+
+| | Value |
 |---|---|
 | Node | `monitoring-1`, AZ a |
 | Instance | `r8i.xlarge`, 100 GiB gp3 for Prometheus data |
@@ -57,8 +59,8 @@ keeps its first-boot config, so replace the node or edit
 
 | Input | Meaning |
 |---|---|
-| `base`, `instance_type`, `volume_size` | Shared settings and size |
-| `retention` | How long Prometheus keeps data |
+| `base` | Shared settings (VPC, region, SSH key, VPN group) |
+| `private_subnet_ids` | Exactly 3 private subnets; the node goes in the first |
 
 | Output | Used by |
 |---|---|
