@@ -1,10 +1,11 @@
+# The Praefect nodes' group (not the NLB's): gitaly allows Praefect in with it.
 output "security_group_id" {
-  value = aws_security_group.this.id
+  value = aws_security_group.praefect_sg.id
 }
 
 output "endpoint" {
   description = "Host name of the NLB; GitLab's Gitaly address is tcp://<this>:2305"
-  value       = aws_lb.this.dns_name
+  value       = aws_lb.praefect_nlb.dns_name
 }
 
 output "external_token_secret_arn" {
@@ -18,5 +19,5 @@ output "internal_token_secret_arn" {
 }
 
 output "private_ips" {
-  value = { for name, i in aws_instance.this : name => i.private_ip }
+  value = { for i, node in aws_instance.praefect : "praefect-${i + 1}" => node.private_ip }
 }
